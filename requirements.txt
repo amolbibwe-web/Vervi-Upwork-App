@@ -1,0 +1,14 @@
+pandas>=2.0
+openpyxl>=3.1
+
+# RBI reference-rate fetching (rbi_fx.py)
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=5.0
+
+# The browser UI (webapp.py). The CLI runs without these.
+flask>=3.0
+
+# Production server used when hosted (Render / any PaaS). Harmless locally on
+# Windows -- it installs but is only invoked by the host's start command.
+gunicorn>=21.2; sys_platform != "win32"

@@ -1,0 +1,28 @@
+# Deploy the working app (not just the interface) to Render's free tier.
+#
+# GitHub Pages serves static files only, so it can host the interface preview
+# but cannot run Python. This runs the real converter at a public https URL.
+#
+# In Render: New > Blueprint > point at this repo. It reads this file, builds,
+# and gives you https://vervi-upwork.onrender.com (or similar).
+#
+# Set VERVI_PASS in the Render dashboard before sharing the URL -- the default
+# is 'admin', which is guessed by the first scanner that finds the address.
+services:
+  - type: web
+    name: vervi-upwork
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn webapp:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.10"
+      - key: VERVI_USER
+        value: admin
+      - key: VERVI_PASS
+        sync: false          # set this yourself in the dashboard, not in git
+      - key: VERVI_SECRET
+        generateValue: true  # keeps sessions alive across restarts
+      - key: VERVI_HTTPS_ONLY
+        value: "1"           # Render terminates TLS, so the cookie can be secure
