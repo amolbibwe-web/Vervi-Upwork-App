@@ -105,7 +105,7 @@ VOUCHER_SALES = "Sales"
 VOUCHER_JE = "JE"
 DEFAULT_DOC_SERIES = {
     VOUCHER_JE: "{fy}/LLP/{mon}/{seq:03d}",
-    VOUCHER_SALES: "{fy}/V/RE-U/{seq:03d}",
+    VOUCHER_SALES: "{fy}/VASL/U/{seq:03d}",
 }
 
 #: Columns of the import file, in the order the accounting system reads them.
@@ -162,7 +162,7 @@ REQUIRED_STATEMENT_COLUMNS = ("date", "txn_type", "amount_usd", "account_name")
 #: Output column order for the journal.
 JOURNAL_COLUMNS = [
     "Sr. No.", "Document Number", "Voucher Type", "Date", "Period",
-    "Transaction ID", "Ref ID", "Transaction Type", "Account Name",
+    "Transaction ID", "Ref ID", "Transaction Type", "Subsidiary", "Account Name",
     "Cost Center", "Client Team", "Ledger", "Dr/Cr",
     "Debit", "Credit", "Currency", "Amount USD", "FX Rate", "Rate Date",
     "Rate Source", "Narration",
@@ -328,6 +328,9 @@ class Mapping:
     #: Account Name -> Cost Center (Table B, column I).  Optional: an account
     #: with no cost centre falls back to the statement's Freelancer.
     cost_centers: dict[str, str] = field(default_factory=dict)
+    #: Account Name -> Subsidiary (Table B, column J).  Optional: an account
+    #: with no subsidiary falls back to the --entity default.
+    subsidiaries: dict[str, str] = field(default_factory=dict)
 
 
 #: Tokens that carry no identifying information when matching an account name
@@ -429,7 +432,9 @@ def parse_treatments(grid: list[list[Any]], mapping: Mapping) -> None:
         raise ValueError("Mapping file has no 'Nature' header -- Table A not found")
     header_row, col = found
 
-    # An optional Kind column may sit anywhere in the five cells after Nature.
+    # Optional Kind / Subsidiary columns may sit anywhere in the cells after
+    # Nature. Scanned within this table's own block rather than by searching the
+    # whole sheet, so Table B's Subsidiary column is never mistaken for this one.
     kind_col = None
     for offset in range(1, 7):
         if norm_header(cell(grid, header_row, col + offset)) == "kind":
@@ -439,7 +444,9 @@ def parse_treatments(grid: list[list[Any]], mapping: Mapping) -> None:
     for r in range(header_row + 1, len(grid)):
         nature = clean_text(cell(grid, r, col))
         if not nature:
-            break  # blank Nature terminates Table A
+            # Skip, don't stop: deleting a rule leaves a gap mid-table, and
+            # stopping here would silently drop every rule below it.
+            continue
         d1 = clean_text(cell(grid, r, col + 1))
         d2 = clean_text(cell(grid, r, col + 2))
         c1 = clean_text(cell(grid, r, col + 3))
@@ -480,6 +487,10 @@ def parse_wallets(grid: list[list[Any]], mapping: Mapping, *,
         cost_center = clean_text(cell(grid, r, col + 2))
         if cost_center:
             mapping.cost_centers.setdefault(key, cost_center)
+        # Column J, optional -- blank means "use the --entity default".
+        subsidiary = clean_text(cell(grid, r, col + 3))
+        if subsidiary:
+            mapping.subsidiaries.setdefault(key, subsidiary)
         seen = candidates.setdefault(key, [])
         if not any(norm_key(gl) == norm_key(existing) for existing in seen):
             seen.append(gl)
@@ -605,17 +616,89 @@ def _append_to_table(path: Path, header: str, values: list[str]) -> None:
     _write_grid(path, grid)
 
 
-def add_wallet(path: Path, account: str, gl_name: str, cost_center: str = "") -> None:
-    """Add an Account Name -> GL Name (-> Cost Center) row to Table B."""
+def _row_of(grid: list[list[Any]], header: str, key: str) -> tuple[int, int]:
+    """Locate the row under `header` whose first cell matches `key`."""
+    found = find_header(grid, header)
+    if not found:
+        raise ValueError(f"No '{header}' table found in the master database")
+    header_row, col = found
+    for r in range(header_row + 1, len(grid)):
+        if norm_key(cell(grid, r, col)) == norm_key(key):
+            return r, col
+    raise ValueError(f"'{key}' is not in the master database")
+
+
+def _write_row(path: Path, header: str, key: str, values: list[str]) -> None:
+    """Overwrite one row of a table in place, leaving the other table alone.
+
+    The two tables share rows on one sheet, so only this table's own cells are
+    touched -- a treatment sitting on the same line is never disturbed.
+    """
+    if path.suffix.lower() != ".csv":
+        raise ValueError("Only a .csv master database can be edited here; "
+                         "edit an .xlsx master in Excel")
+    grid = [list(row) for row in read_raw(path)]
+    r, col = _row_of(grid, header, key)
+    width = max(max((len(row) for row in grid), default=0), col + len(values))
+    while len(grid[r]) < width:
+        grid[r].append("")
+    for offset, value in enumerate(values):
+        grid[r][col + offset] = value
+    _write_grid(path, grid)
+
+
+def update_wallet(path: Path, key: str, account: str, gl_name: str,
+                  cost_center: str = "", subsidiary: str = "") -> None:
+    """Rewrite the Table B row currently keyed on `key`."""
     account, gl_name = clean_text(account), clean_text(gl_name)
-    cost_center = clean_text(cost_center)
+    cost_center, subsidiary = clean_text(cost_center), clean_text(subsidiary)
+    if not account or not gl_name:
+        raise ValueError("Both an account name and a GL name are required")
+    existing = load_mapping(path).wallets
+    # Renaming onto another account would give one name two ledgers.
+    if norm_key(account) != norm_key(key) and norm_key(account) in existing:
+        raise ValueError(f"'{account}' already exists in the master database")
+    _write_row(path, "Account Name", key, [account, gl_name, cost_center, subsidiary])
+
+
+def delete_wallet(path: Path, key: str) -> None:
+    """Clear a Table B row. The line stays so Table A keeps its position."""
+    _write_row(path, "Account Name", key, ["", "", "", ""])
+
+
+def update_treatment(path: Path, key: str, nature: str, debit_1: str, debit_2: str,
+                     credit_1: str, credit_2: str) -> None:
+    """Rewrite the Table A row currently keyed on `key`."""
+    nature = clean_text(nature)
+    if not nature:
+        raise ValueError("A transaction type is required")
+    if not clean_text(debit_1) or not clean_text(credit_1):
+        raise ValueError("At least one debit and one credit ledger are required")
+    existing = load_mapping(path).treatments
+    if norm_key(nature) != norm_key(key) and norm_key(nature) in existing:
+        raise ValueError(f"A rule for '{nature}' already exists")
+    _write_row(path, "Nature", key, [
+        nature, clean_text(debit_1), clean_text(debit_2) or "NA",
+        clean_text(credit_1), clean_text(credit_2) or "NA"])
+
+
+def delete_treatment(path: Path, key: str) -> None:
+    """Clear a Table A row. The line stays so Table B keeps its position."""
+    _write_row(path, "Nature", key, ["", "", "", "", ""])
+
+
+def add_wallet(path: Path, account: str, gl_name: str, cost_center: str = "",
+               subsidiary: str = "") -> None:
+    """Add an Account Name -> GL Name -> Cost Center -> Subsidiary row to Table B."""
+    account, gl_name = clean_text(account), clean_text(gl_name)
+    cost_center, subsidiary = clean_text(cost_center), clean_text(subsidiary)
     if not account or not gl_name:
         raise ValueError("Both an account name and a GL name are required")
     existing = load_mapping(path).wallets
     if norm_key(account) in existing:
         raise ValueError(f"'{account}' is already mapped to "
                          f"'{existing[norm_key(account)]}'")
-    _append_to_table(path, "Account Name", [account, gl_name, cost_center])
+    _append_to_table(path, "Account Name", [account, gl_name, cost_center, subsidiary])
 
 
 def add_treatment(path: Path, nature: str, debit_1: str, debit_2: str,
@@ -949,7 +1032,8 @@ def build_journal(statement: pd.DataFrame, mapping: Mapping, *,
                   igst_rate: Decimal, currency: str, fx_provider,
                   income_mode: str, reporter: Reporter,
                   doc_series: dict[str, str] | None = None,
-                  numberer: "DocumentNumberer | None" = None) -> pd.DataFrame:
+                  numberer: "DocumentNumberer | None" = None,
+                  entity: str = "") -> pd.DataFrame:
     """Walk the statement and emit journal lines.
 
     `fx_provider` resolves one rate per transaction date (see rbi_fx.py); it is
@@ -1066,6 +1150,10 @@ def build_journal(statement: pd.DataFrame, mapping: Mapping, *,
         cost_center = (mapping.cost_centers.get(account_key)
                        or clean_text(row.get("freelancer"))
                        or account)
+        # Subsidiary: the entity this voucher belongs to. A rule-level override
+        # wins if one is set, then the account's own entity, then the run default
+        # -- so a shared statement can still post to more than one entity.
+        subsidiary = mapping.subsidiaries.get(account_key) or entity
 
         for voucher in build_legs(treatment, ctx, income_mode):
             doc_no = numberer.next(voucher.kind, date.date())
@@ -1091,6 +1179,7 @@ def build_journal(statement: pd.DataFrame, mapping: Mapping, *,
                     "Transaction ID": clean_text(row.get("transaction_id")),
                     "Ref ID": clean_text(row.get("ref_id")),
                     "Transaction Type": treatment.nature,
+                    "Subsidiary": subsidiary,
                     "Account Name": account,
                     "Cost Center": cost_center,
                     "Client Team": ctx.client,
@@ -1133,7 +1222,9 @@ def build_import_frame(journal: pd.DataFrame, *, entity: str, currency: str,
         amount = round(float(line["Debit"] if line["Dr/Cr"] == "Dr" else line["Credit"]), 2)
         is_sale = line["Voucher Type"] == VOUCHER_SALES
         rows.append({
-            "Subsidiary": entity,
+            # Per-line, so one statement can span entities. Falls back to the
+            # run-wide entity when the master says nothing.
+            "Subsidiary": line.get("Subsidiary") or entity,
             "Transaction date": line["Date"].strftime("%d/%m/%Y"),
             "Period": line["Period"],
             "Document Number": line["Document Number"],
@@ -1449,7 +1540,8 @@ def main(argv: list[str] | None = None) -> int:
     journal = build_journal(
         statement, mapping,
         igst_rate=igst_rate, currency=args.currency, fx_provider=fx_provider,
-        income_mode=args.income_mode, reporter=reporter, numberer=numberer)
+        income_mode=args.income_mode, reporter=reporter, numberer=numberer,
+        entity=args.entity)
 
     # Every stale-rate decision goes on the record as an INFO note, so the
     # accountant sees which dates were priced off an older day's rate.

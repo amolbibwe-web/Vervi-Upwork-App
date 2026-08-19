@@ -46,8 +46,10 @@ from upwork_to_journal import (DEFAULT_DOC_REGISTRY, DEFAULT_DOC_SERIES,
                                VOUCHER_JE, VOUCHER_SALES, DocumentNumberer,
                                Reporter, add_treatment, add_wallet,
                                build_import_frame, build_journal,
-                               build_reconciliation, clean_text, load_mapping,
-                               load_statement, to_decimal, write_outputs)
+                               build_reconciliation, clean_text, delete_treatment,
+                               delete_wallet, load_mapping, load_statement,
+                               to_decimal, update_treatment, update_wallet,
+                               write_outputs)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024  # 32 MB upload ceiling
@@ -396,9 +398,33 @@ td.narr{color:var(--muted);max-width:340px;overflow:hidden;text-overflow:ellipsi
 .addhead{font-size:13px;color:var(--muted);margin-bottom:11px}
 .addgrid{display:grid;gap:11px;align-items:end;grid-template-columns:1fr 1fr auto}
 .addgrid.three{grid-template-columns:repeat(3,1fr) auto}
+.addgrid.four{grid-template-columns:repeat(4,1fr) auto}
 .addgrid.five{grid-template-columns:repeat(5,1fr) auto}
 .addgrid button{white-space:nowrap}
 @media (max-width:900px){.addgrid,.addgrid.five{grid-template-columns:1fr}}
+
+/* ---- per-row edit ---- */
+th.actcol,td.actcol{width:1%;white-space:nowrap;text-align:center}
+.editbtn{background:none;border:1px solid var(--line);color:var(--muted);border-radius:7px;
+   padding:3px 11px;font-size:12.5px;font-weight:500;cursor:pointer;box-shadow:none;
+   font-family:var(--font)}
+.editbtn:hover{border-color:var(--brand);color:var(--brand);background:var(--brand-soft);
+   transform:none;filter:none}
+.modal{position:fixed;inset:0;z-index:80;background:rgba(15,18,32,.45);
+   display:grid;place-items:center;padding:20px}
+.modal[hidden]{display:none}
+.modal-box{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+   padding:24px;width:100%;max-width:560px;box-shadow:0 24px 60px -20px rgba(16,24,40,.5)}
+.modal-box h3{margin:0 0 4px;font-size:17px;font-weight:700;letter-spacing:-.01em}
+.modal-box .sub{color:var(--muted);font-size:13.5px;margin:0 0 18px}
+.modal-grid{display:grid;gap:13px;grid-template-columns:1fr 1fr}
+.modal-grid .wide{grid-column:1 / -1}
+.modal-foot{display:flex;gap:9px;margin-top:22px;align-items:center}
+.modal-foot .spacer{margin-left:auto}
+.btn-danger{background:none;border:1px solid var(--err);color:var(--err);box-shadow:none;
+   font-weight:500;padding:10px 16px;border-radius:9px;font-size:14px;cursor:pointer;
+   font-family:var(--font)}
+.btn-danger:hover{background:var(--err-bg);filter:none;transform:none}
 
 code{font-family:var(--mono);font-size:12.5px;background:var(--panel-2);padding:2px 5px;
      border-radius:4px;border:1px solid var(--line)}
@@ -455,6 +481,61 @@ try { applyTheme(localStorage.getItem('vervi-theme')); } catch (e) {}
 // column. Case-insensitive substring, so "IGST" or "07/07" both work.
 var FILTERS = {};
 var POP = {table: null, col: -1, values: []};
+
+// ---- editing a master row -------------------------------------------------
+// Values come from data- attributes on the button, so the dialog always shows
+// exactly what is on the row rather than a second copy that could drift.
+function openEdit(btn){
+  var d = btn.dataset;
+  var modal = document.getElementById('editmodal');
+  var isAccount = d.kind === 'account';
+  document.getElementById('em-title').textContent =
+    isAccount ? 'Edit account' : 'Edit treatment rule';
+  document.getElementById('em-sub').textContent =
+    'Saving rewrites this row in the master database.';
+  document.getElementById('em-key').value = d.key || '';
+  document.getElementById('em-form').action =
+    isAccount ? '/master/account/update' : '/master/treatment/update';
+  document.getElementById('em-account').style.display = isAccount ? '' : 'none';
+  document.getElementById('em-treatment').style.display = isAccount ? 'none' : '';
+
+  if (isAccount){
+    document.getElementById('em-a-name').value = d.account || '';
+    document.getElementById('em-a-gl').value = d.gl || '';
+    document.getElementById('em-a-cc').value = d.cc || '';
+    document.getElementById('em-a-sub').value = d.sub || '';
+  } else {
+    document.getElementById('em-t-nat').value = d.nature || '';
+    document.getElementById('em-t-d1').value = d.d1 || '';
+    document.getElementById('em-t-d2').value = d.d2 || '';
+    document.getElementById('em-t-c1').value = d.c1 || '';
+    document.getElementById('em-t-c2').value = d.c2 || '';
+  }
+
+  var del = document.getElementById('em-delete');
+  del.onclick = function(){
+    var what = isAccount ? (d.account || 'this account') : (d.nature || 'this rule');
+    if (!confirm('Remove ' + what + ' from the master database?')) return;
+    var f = document.getElementById('em-form');
+    f.action = isAccount ? '/master/account/delete' : '/master/treatment/delete';
+    f.submit();
+  };
+
+  modal.hidden = false;
+  (isAccount ? document.getElementById('em-a-name')
+             : document.getElementById('em-t-nat')).focus();
+}
+function closeEdit(){
+  var m = document.getElementById('editmodal');
+  if (m) m.hidden = true;
+}
+document.addEventListener('keydown', function(e){
+  if (e.key === 'Escape') closeEdit();
+});
+document.addEventListener('click', function(e){
+  // Clicking the dimmed backdrop, but not the dialog itself, dismisses it.
+  if (e.target && e.target.id === 'editmodal') closeEdit();
+});
 
 function cellText(row, col){
   var c = row.cells[col];
@@ -797,6 +878,54 @@ SIDEBAR = """<aside class="side">
   </div>
 </aside>"""
 
+#: One dialog serves both tabs; JS shows whichever fieldset applies.
+EDIT_MODAL = """
+<div class="modal" id="editmodal" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="em-title">
+    <h3 id="em-title">Edit</h3>
+    <p class="sub" id="em-sub"></p>
+
+    <form method="post" id="em-form">
+      <input type="hidden" name="key" id="em-key">
+
+      <div class="modal-grid" id="em-account">
+        <div><label for="em-a-name">Account name (col G)</label>
+          <input type="text" id="em-a-name" name="account"></div>
+        <div><label for="em-a-gl">GL name (col H)</label>
+          <input type="text" id="em-a-gl" name="gl_name"></div>
+        <div><label for="em-a-cc">Cost centre (col I)</label>
+          <input type="text" id="em-a-cc" name="cost_center"></div>
+        <div><label for="em-a-sub">Subsidiary (col J)</label>
+          <input type="text" id="em-a-sub" name="subsidiary"></div>
+        <div class="wide hint">A blank cost centre falls back to the statement's
+          Freelancer; a blank subsidiary falls back to the run's entity.</div>
+      </div>
+
+      <div class="modal-grid" id="em-treatment">
+        <div class="wide"><label for="em-t-nat">Transaction type</label>
+          <input type="text" id="em-t-nat" name="nature"></div>
+        <div><label for="em-t-d1">Debit 1</label>
+          <input type="text" id="em-t-d1" name="debit_1"></div>
+        <div><label for="em-t-d2">Debit 2</label>
+          <input type="text" id="em-t-d2" name="debit_2"></div>
+        <div><label for="em-t-c1">Credit 1</label>
+          <input type="text" id="em-t-c1" name="credit_1"></div>
+        <div><label for="em-t-c2">Credit 2</label>
+          <input type="text" id="em-t-c2" name="credit_2"></div>
+        <div class="wide hint">Use <code>GL Name</code> for the wallet,
+          <code>Client Team</code> for the client, <code>NA</code> for an unused leg.</div>
+      </div>
+
+      <div class="modal-foot">
+        <button type="button" class="btn-danger" id="em-delete">Delete</button>
+        <span class="spacer"></span>
+        <button type="button" class="ghost" onclick="closeEdit()">Cancel</button>
+        <button type="submit">Save changes</button>
+      </div>
+    </form>
+  </div>
+</div>"""
+
 FORM_SIDE = """
   <div class="sblock c1">
     <div class="slabel">Master database</div>
@@ -919,13 +1048,15 @@ FORM_HTML = """<!doctype html><html><head><meta charset="utf-8">
       <form class="addrow" method="post" action="{{ url_for('add_account') }}">
         <div class="addhead">Add an account &mdash; appended to the end of the master.
           Leave the cost centre blank to fall back to the statement's Freelancer.</div>
-        <div class="addgrid three">
+        <div class="addgrid four">
           <div><label for="a-name">Account name (col G)</label>
             <input type="text" id="a-name" name="account" placeholder="as it appears on the statement" required></div>
           <div><label for="a-gl">GL name (col H)</label>
             <input type="text" id="a-gl" name="gl_name" placeholder="Upwork ..." required></div>
           <div><label for="a-cc">Cost centre (col I)</label>
             <input type="text" id="a-cc" name="cost_center" placeholder="e.g. TPT-Badshah"></div>
+          <div><label for="a-sub">Subsidiary (col J)</label>
+            <input type="text" id="a-sub" name="subsidiary" value="{{ entity }}"></div>
           <button type="submit" class="ghost">Add account</button>
         </div>
       </form>
@@ -953,7 +1084,9 @@ FORM_HTML = """<!doctype html><html><head><meta charset="utf-8">
     </div>
   </div>
   {% endif %}
-</main></div><script>""" + TAB_JS + """</script></body></html>"""
+</main></div>
+""" + EDIT_MODAL + """
+<script>""" + TAB_JS + """</script></body></html>"""
 
 VERIFY_HTML = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1216,7 +1349,7 @@ _table_seq = itertools.count(1)
 def html_table(frame: pd.DataFrame, empty_message: str,
                numeric: tuple[str, ...] = (), voucher_breaks: bool = False,
                precise: tuple[str, ...] = (), filterable: bool = True,
-               links: dict | None = None) -> str:
+               links: dict | None = None, actions=None) -> str:
     """Render a DataFrame as a styled table.
 
     Hand-rolled rather than `DataFrame.to_html` so amounts can be right-aligned,
@@ -1238,6 +1371,8 @@ def html_table(frame: pd.DataFrame, empty_message: str,
             f"</span></th>" for c in frame.columns)
     else:
         head = "".join(f"<th>{escape(str(c))}</th>" for c in frame.columns)
+    if actions:
+        head += '<th class="actcol">Edit</th>'
     body: list[str] = []
     previous_doc = None
     doc_col = "Document Number" if "Document Number" in frame.columns else None
@@ -1291,6 +1426,8 @@ def html_table(frame: pd.DataFrame, empty_message: str,
                              f'{escape(text)}</td>')
             else:
                 cells.append(f'<td>{"" if pd.isna(value) else escape(str(value))}</td>')
+        if actions:
+            cells.append(f'<td class="actcol">{actions(row)}</td>')
         body.append(f'<tr class="{" ".join(classes)}">{"".join(cells)}</tr>')
 
     rows_total = len(body)
@@ -1457,17 +1594,41 @@ def master_preview() -> dict:
         [{"Sr. No.": i,
           "Account Name (col G)": mapping.wallet_display.get(key, key),
           "GL Name (col H)": gl,
-          "Cost Center (col I)": mapping.cost_centers.get(key, "")}
+          "Cost Center (col I)": mapping.cost_centers.get(key, ""),
+          "Subsidiary (col J)": mapping.subsidiaries.get(key, "")}
          for i, (key, gl) in enumerate(sorted(mapping.wallets.items()), start=1)])
     treatments = pd.DataFrame(
         [{"Sr. No.": i, "Nature": t.nature, "Treatment": t.kind,
           "Debit": " + ".join(x for x in (t.debit_1, t.debit_2) if x and x.upper() != "NA"),
           "Credit": " + ".join(x for x in (t.credit_1, t.credit_2) if x and x.upper() != "NA")}
          for i, t in enumerate(mapping.treatments.values(), start=1)])
+    def account_action(row):
+        return (f'<button type="button" class="editbtn" onclick="openEdit(this)" '
+                f'data-kind="account" '
+                f'data-key="{escape(str(row["Account Name (col G)"]), quote=True)}" '
+                f'data-account="{escape(str(row["Account Name (col G)"]), quote=True)}" '
+                f'data-gl="{escape(str(row["GL Name (col H)"]), quote=True)}" '
+                f'data-cc="{escape(str(row["Cost Center (col I)"]), quote=True)}" '
+                f'data-sub="{escape(str(row["Subsidiary (col J)"]), quote=True)}">Edit</button>')
+
+    def treatment_action(row):
+        t = by_nature[row["Nature"]]
+        return (f'<button type="button" class="editbtn" onclick="openEdit(this)" '
+                f'data-kind="treatment" '
+                f'data-key="{escape(t.nature, quote=True)}" '
+                f'data-nature="{escape(t.nature, quote=True)}" '
+                f'data-d1="{escape(t.debit_1, quote=True)}" '
+                f'data-d2="{escape(t.debit_2, quote=True)}" '
+                f'data-c1="{escape(t.credit_1, quote=True)}" '
+                f'data-c2="{escape(t.credit_2, quote=True)}">Edit</button>')
+
+    by_nature = {t.nature: t for t in mapping.treatments.values()}
     return {
         "master_error": None,
-        "wallet_table": html_table(wallets, "No accounts in the master."),
-        "treatment_table": html_table(treatments, "No treatments in the master."),
+        "wallet_table": html_table(wallets, "No accounts in the master.",
+                                   actions=account_action),
+        "treatment_table": html_table(treatments, "No treatments in the master.",
+                                      actions=treatment_action),
         "n_accounts": len(wallets),
         "n_treatments": len(treatments),
     }
@@ -1511,13 +1672,63 @@ def add_account():
         account = request.form.get("account", "")
         gl_name = request.form.get("gl_name", "")
         cost_center = request.form.get("cost_center", "")
-        add_wallet(MASTER_MAPPING, account, gl_name, cost_center)
+        add_wallet(MASTER_MAPPING, account, gl_name, cost_center,
+                   request.form.get("subsidiary", ""))
     except Exception as exc:
         return redirect(url_for("index", error=str(exc)))
     note = f"Added {clean_text(account)} -> {clean_text(gl_name)}"
     if clean_text(cost_center):
         note += f", cost centre {clean_text(cost_center)}"
     return redirect(url_for("index", added=note))
+
+
+@app.route("/master/account/update", methods=["POST"])
+def edit_account():
+    """Rewrite one Table B row."""
+    key = request.form.get("key", "")
+    try:
+        update_wallet(MASTER_MAPPING, key, request.form.get("account", ""),
+                      request.form.get("gl_name", ""),
+                      request.form.get("cost_center", ""),
+                      request.form.get("subsidiary", ""))
+    except Exception as exc:
+        return redirect(url_for("index", error=str(exc)))
+    return redirect(url_for("index", added=f"Updated {clean_text(key)}"))
+
+
+@app.route("/master/account/delete", methods=["POST"])
+def remove_account():
+    """Remove one Table B row."""
+    key = request.form.get("key", "")
+    try:
+        delete_wallet(MASTER_MAPPING, key)
+    except Exception as exc:
+        return redirect(url_for("index", error=str(exc)))
+    return redirect(url_for("index", added=f"Removed {clean_text(key)}"))
+
+
+@app.route("/master/treatment/update", methods=["POST"])
+def edit_rule():
+    """Rewrite one Table A row."""
+    key = request.form.get("key", "")
+    try:
+        update_treatment(MASTER_MAPPING, key, request.form.get("nature", ""),
+                         request.form.get("debit_1", ""), request.form.get("debit_2", ""),
+                         request.form.get("credit_1", ""), request.form.get("credit_2", ""))
+    except Exception as exc:
+        return redirect(url_for("index", error=str(exc)))
+    return redirect(url_for("index", added=f"Updated the rule for {clean_text(key)}"))
+
+
+@app.route("/master/treatment/delete", methods=["POST"])
+def remove_rule():
+    """Remove one Table A row."""
+    key = request.form.get("key", "")
+    try:
+        delete_treatment(MASTER_MAPPING, key)
+    except Exception as exc:
+        return redirect(url_for("index", error=str(exc)))
+    return redirect(url_for("index", added=f"Removed the rule for {clean_text(key)}"))
 
 
 @app.route("/master/treatment", methods=["POST"])
