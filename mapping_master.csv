@@ -1,0 +1,14 @@
+Nature,Debit,Debit,Credit,Credit,,Account Name,GL Name,Cost Center
+Service Fee,Upwork Charges,RCM Input IGST,GL Name,RCM Output IGST,,Amol Modani,Upwork Amol Modani,Priya-Priya
+WHT,TDS,NA,GL Name,NA,,Apurva Joshi,Upwork Apurva,
+Connects,Connects charges,RCM Input IGST,GL Name,RCM Output IGST,,Atish Pahade,Upwork Atish Pahade,TPT-Atish
+Subscription,Upwork Membership Fees,RCM Input IGST,GL Name,RCM Output IGST,,Darshini Dayala,Upwork Darshani,
+Withdrawal Fee,Withdrawal fees,RCM Input IGST,GL Name,RCM Output IGST,,Devendra Mandhana,Upwork Devendra Mandhana,Devendra-Devendra
+Fixed-price,Client Team,Revenue - TPT Export,GL Name,Client Team,,Divyam Jain,Upwork Divyam Jain,Priya-Priya
+Hourly,Client Team,Revenue - TPT Export,GL Name,Client Team,,Harsh Jain,Upwork Harsh Jain,Priya-Priya
+Withdrawal,NO Entry,NO Entry,NO Entry,NO Entry,,Harshal Jain,Upwork Harshal Jain,Priya-Priya
+,,,,,,Krutanjali Patil,Upwork Krutanjali,Harshal-Krutanjali
+,,,,,,Motashim Badshah,Upwork MB,TPT-Badshah
+,,,,,,Priya Agrawal,Upwork Priya Agrawal,Priya-Priya
+,,,,,,Raghav Agrawal,Upwork Raghav Agrawal,Priya-Priya
+,,,,,,Shantanu Agrawal,Upwork Shantanu Agrawal,Priya-Priya

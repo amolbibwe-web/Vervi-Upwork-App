@@ -395,6 +395,7 @@ td.narr{color:var(--muted);max-width:340px;overflow:hidden;text-overflow:ellipsi
         background:var(--panel-2)}
 .addhead{font-size:13px;color:var(--muted);margin-bottom:11px}
 .addgrid{display:grid;gap:11px;align-items:end;grid-template-columns:1fr 1fr auto}
+.addgrid.three{grid-template-columns:repeat(3,1fr) auto}
 .addgrid.five{grid-template-columns:repeat(5,1fr) auto}
 .addgrid button{white-space:nowrap}
 @media (max-width:900px){.addgrid,.addgrid.five{grid-template-columns:1fr}}
@@ -916,12 +917,15 @@ FORM_HTML = """<!doctype html><html><head><meta charset="utf-8">
     <div id="m-acc" class="pane on">
       {{ wallet_table|safe }}
       <form class="addrow" method="post" action="{{ url_for('add_account') }}">
-        <div class="addhead">Add an account &mdash; appended to the end of the master</div>
-        <div class="addgrid">
+        <div class="addhead">Add an account &mdash; appended to the end of the master.
+          Leave the cost centre blank to fall back to the statement's Freelancer.</div>
+        <div class="addgrid three">
           <div><label for="a-name">Account name (col G)</label>
             <input type="text" id="a-name" name="account" placeholder="as it appears on the statement" required></div>
           <div><label for="a-gl">GL name (col H)</label>
             <input type="text" id="a-gl" name="gl_name" placeholder="Upwork ..." required></div>
+          <div><label for="a-cc">Cost centre (col I)</label>
+            <input type="text" id="a-cc" name="cost_center" placeholder="e.g. TPT-Badshah"></div>
           <button type="submit" class="ghost">Add account</button>
         </div>
       </form>
@@ -1452,7 +1456,8 @@ def master_preview() -> dict:
     wallets = pd.DataFrame(
         [{"Sr. No.": i,
           "Account Name (col G)": mapping.wallet_display.get(key, key),
-          "GL Name (col H)": gl}
+          "GL Name (col H)": gl,
+          "Cost Center (col I)": mapping.cost_centers.get(key, "")}
          for i, (key, gl) in enumerate(sorted(mapping.wallets.items()), start=1)])
     treatments = pd.DataFrame(
         [{"Sr. No.": i, "Nature": t.nature, "Treatment": t.kind,
@@ -1501,15 +1506,18 @@ def form_with_error(message: str, form) -> str:
 
 @app.route("/master/account", methods=["POST"])
 def add_account():
-    """Append an Account Name -> GL Name row to the master database."""
+    """Append an Account Name -> GL Name -> Cost Center row to the master."""
     try:
         account = request.form.get("account", "")
         gl_name = request.form.get("gl_name", "")
-        add_wallet(MASTER_MAPPING, account, gl_name)
+        cost_center = request.form.get("cost_center", "")
+        add_wallet(MASTER_MAPPING, account, gl_name, cost_center)
     except Exception as exc:
         return redirect(url_for("index", error=str(exc)))
-    return redirect(url_for("index",
-                            added=f"Added {clean_text(account)} -> {clean_text(gl_name)}"))
+    note = f"Added {clean_text(account)} -> {clean_text(gl_name)}"
+    if clean_text(cost_center):
+        note += f", cost centre {clean_text(cost_center)}"
+    return redirect(url_for("index", added=note))
 
 
 @app.route("/master/treatment", methods=["POST"])

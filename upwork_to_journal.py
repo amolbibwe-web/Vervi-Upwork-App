@@ -325,6 +325,9 @@ class Mapping:
     fx_rates: dict[str, Decimal] = field(default_factory=dict)
     #: display-cased account names, for readable exception messages
     wallet_display: dict[str, str] = field(default_factory=dict)
+    #: Account Name -> Cost Center (Table B, column I).  Optional: an account
+    #: with no cost centre falls back to the statement's Freelancer.
+    cost_centers: dict[str, str] = field(default_factory=dict)
 
 
 #: Tokens that carry no identifying information when matching an account name
@@ -473,6 +476,10 @@ def parse_wallets(grid: list[list[Any]], mapping: Mapping, *,
             continue  # Table B may have gaps; keep scanning to the sheet end
         key = norm_key(account)
         mapping.wallet_display.setdefault(key, account)
+        # Column I, optional -- blank means "use the statement's Freelancer".
+        cost_center = clean_text(cell(grid, r, col + 2))
+        if cost_center:
+            mapping.cost_centers.setdefault(key, cost_center)
         seen = candidates.setdefault(key, [])
         if not any(norm_key(gl) == norm_key(existing) for existing in seen):
             seen.append(gl)
@@ -598,16 +605,17 @@ def _append_to_table(path: Path, header: str, values: list[str]) -> None:
     _write_grid(path, grid)
 
 
-def add_wallet(path: Path, account: str, gl_name: str) -> None:
-    """Add an Account Name -> GL Name row to Table B."""
+def add_wallet(path: Path, account: str, gl_name: str, cost_center: str = "") -> None:
+    """Add an Account Name -> GL Name (-> Cost Center) row to Table B."""
     account, gl_name = clean_text(account), clean_text(gl_name)
+    cost_center = clean_text(cost_center)
     if not account or not gl_name:
         raise ValueError("Both an account name and a GL name are required")
     existing = load_mapping(path).wallets
     if norm_key(account) in existing:
         raise ValueError(f"'{account}' is already mapped to "
                          f"'{existing[norm_key(account)]}'")
-    _append_to_table(path, "Account Name", [account, gl_name])
+    _append_to_table(path, "Account Name", [account, gl_name, cost_center])
 
 
 def add_treatment(path: Path, nature: str, debit_1: str, debit_2: str,
@@ -1050,10 +1058,14 @@ def build_journal(statement: pd.DataFrame, mapping: Mapping, *,
 
         # --- build, verify and emit -----------------------------------------
         text = narration(row, treatment.nature)
-        # Cost centre is the person who earned or spent -- the Freelancer column,
-        # falling back to the wallet owner for rows with no freelancer (Connects,
-        # Subscription and the like are billed to the account, not a contract).
-        cost_center = clean_text(row.get("freelancer")) or account
+        # Cost centre: the master database decides, because the code the books
+        # use ("TPT-Badshah") is rarely the name on the statement. Only when an
+        # account has no cost centre there do we fall back to the Freelancer
+        # column, and then to the wallet owner for rows with no freelancer at all
+        # (Connects and Subscription are billed to the account, not a contract).
+        cost_center = (mapping.cost_centers.get(account_key)
+                       or clean_text(row.get("freelancer"))
+                       or account)
 
         for voucher in build_legs(treatment, ctx, income_mode):
             doc_no = numberer.next(voucher.kind, date.date())
