@@ -1272,7 +1272,7 @@ RESULT_SIDE = """
     <div class="srow"><span class="k">IGST</span><span class="v">{{ igst_pct }}%</span></div>
     <div class="srow"><span class="k">Rates</span><span class="v">{{ fx_note }}</span></div>
     <div class="srow"><span class="k">Sales</span><span class="v">{{ income_mode }}</span></div>
-    <div class="srow"><span class="k">Doc numbers</span><span class="v">{{ n_docs }} issued</span></div>
+    <div class="srow"><span class="k">Doc numbers</span><span class="v">{{ n_docs }} reserved</span></div>
   </div>
   <div class="sblock c4">
     <div class="slabel">Download</div>
@@ -1280,6 +1280,8 @@ RESULT_SIDE = """
       <a href="{{ url_for('download', run_id=run_id, kind='csv') }}"><button>Import CSV</button></a>
       <a href="{{ url_for('download', run_id=run_id, kind='xlsx') }}"><button class="ghost">Workbook</button></a>
     </div>
+    <div class="snote">Numbers are reserved, not locked &mdash; they are only
+      taken once you download. Leave without downloading and they come round again.</div>
     <div class="snote"><a href="{{ url_for('index') }}">&larr; Convert another statement</a></div>
   </div>
 """
@@ -1844,13 +1846,16 @@ def run():
         out_xlsx = workdir / "journal.xlsx"
         out_csv = write_outputs(out_xlsx, journal, reconciliation, exceptions, skipped,
                                 fx_audit=fx_audit, import_frame=import_frame)
-        # Only commit the numbers once the output is safely written.
-        n_docs = numberer.save()
+        # Numbers are NOT committed here. Looking at a journal on screen is not
+        # posting it, so the registry is only written when the file is actually
+        # downloaded -- see `download`. Until then these numbers stay available.
+        n_docs = len(numberer.issued)
     except Exception as exc:
         return form_with_error(f"{type(exc).__name__}: {exc}", form)
 
     run_id = uuid.uuid4().hex
-    RUNS[run_id] = {"xlsx": out_xlsx, "csv": out_csv}
+    RUNS[run_id] = {"xlsx": out_xlsx, "csv": out_csv,
+                    "numberer": numberer, "committed": False}
 
     # --- present -------------------------------------------------------------
     total_debit = float(journal["Debit"].sum()) if not journal.empty else 0.0
@@ -1944,10 +1949,23 @@ def fx_verify(rate_date: str):
 
 @app.route("/download/<run_id>/<kind>")
 def download(run_id: str, kind: str):
-    paths = RUNS.get(run_id)
-    if not paths or kind not in paths or not paths[kind].exists():
+    run = RUNS.get(run_id)
+    if not run or kind not in ("xlsx", "csv") or not run[kind].exists():
         abort(404)
-    return send_file(paths[kind], as_attachment=True,
+
+    # Downloading is the moment the numbers leave the tool and become real, so
+    # this is where they are committed to the registry. Generating and then
+    # discarding a journal costs nothing -- the same numbers come round again.
+    if not run["committed"]:
+        try:
+            run["numberer"].save()
+            run["committed"] = True
+        except Exception:
+            # A registry that cannot be written must not block the download; the
+            # figures are still correct, only the reservation is missing.
+            pass
+
+    return send_file(run[kind], as_attachment=True,
                      download_name=f"journal.{kind}")
 
 
