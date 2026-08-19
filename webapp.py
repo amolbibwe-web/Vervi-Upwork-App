@@ -212,6 +212,10 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font);
   :root:not([data-theme="light"]) .iconbtn .sun{display:block}
   :root:not([data-theme="light"]) .iconbtn .moon{display:none}
 }
+.backbtn{display:inline-flex;align-items:center;gap:8px;height:38px;padding:0 16px;
+  border-radius:10px;background:var(--brand-soft);border:1px solid transparent;
+  color:var(--brand);font-size:14px;font-weight:600;text-decoration:none;transition:.15s}
+.backbtn:hover{background:var(--brand);color:#fff;text-decoration:none}
 .signout{display:inline-flex;align-items:center;gap:7px;height:38px;padding:0 15px;
   border-radius:10px;background:var(--panel);border:1px solid var(--line);
   color:var(--ink);font-size:14px;font-weight:500;text-decoration:none;transition:.15s}
@@ -445,6 +449,11 @@ code{font-family:var(--mono);font-size:12.5px;background:var(--panel-2);padding:
 #: a white flash while the rest of the page loads.
 THEME_BOOT = ("<script>try{var t=localStorage.getItem('vervi-theme');"
               "if(t)document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>")
+
+#: Leading the results top bar: the way back to a new run. Always visible, so
+#: nobody has to hunt for it or reload the page by hand.
+BACK_BTN = """<a class="backbtn" href="{{ url_for('index') }}">
+    <span aria-hidden="true">&larr;</span> New journal</a>"""
 
 #: Rendered into the top-right of every signed-in page.
 TOPRIGHT = """<div class="topright">
@@ -1282,7 +1291,10 @@ RESULT_SIDE = """
     </div>
     <div class="snote">Numbers are reserved, not locked &mdash; they are only
       taken once you download. Leave without downloading and they come round again.</div>
-    <div class="snote"><a href="{{ url_for('index') }}">&larr; Convert another statement</a></div>
+    <div class="row" style="margin-top:10px;gap:8px">
+      <a href="{{ url_for('index') }}" style="width:100%">
+        <button type="button" class="ghost" style="width:100%">&larr; Convert another statement</button></a>
+    </div>
   </div>
 """
 
@@ -1296,7 +1308,8 @@ RESULT_HTML = """<!doctype html><html><head><meta charset="utf-8">
 <main class="main">
   <div class="top"><h1>Journal ready</h1>
     <span class="s">{{ vouchers }} vouchers &middot; {{ total_lines }} lines</span>
-    """ + TOPRIGHT + """</div>
+    """ + TOPRIGHT.replace('<div class="topright">',
+                           '<div class="topright">' + BACK_BTN) + """</div>
 
   {% if balanced %}
   <div class="banner ok"><span>&#10004;</span><div><strong>Balanced.</strong>
