@@ -185,6 +185,16 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font);
 .snote code{background:rgba(255,255,255,.14);border:0;color:#fff;
             padding:1px 5px;border-radius:4px;font-size:11.5px}
 .snote a{color:#fff;text-decoration:underline;text-underline-offset:2px}
+/* The sidebar is a purple gradient, so the page's ghost button -- brand-purple
+   text on transparent -- disappears into it. Sidebar buttons get their own
+   treatment: solid white for the primary action, outlined white for the rest. */
+.side button{background:#fff;color:#3f2d9e;border:0;font-weight:600;
+  box-shadow:0 2px 8px -2px rgba(20,10,60,.45)}
+.side button:hover{background:#f4f2ff;color:#2c1d70;filter:none}
+.side button.sidealt{background:rgba(255,255,255,.14);color:#fff;
+  border:1px solid rgba(255,255,255,.45);box-shadow:none;font-weight:500}
+.side button.sidealt:hover{background:rgba(255,255,255,.26);color:#fff}
+.side .row a{text-decoration:none}
 /* Numbered how-to in the sidebar: one short line per step. */
 .steps-list{margin:0;padding:0;list-style:none;counter-reset:s}
 .steps-list li{counter-increment:s;position:relative;padding:3px 0 3px 24px;
@@ -882,7 +892,7 @@ SIDEBAR = """<aside class="side">
       <li>Check every account appears below</li>
       <li>Hit <strong>Generate journal</strong></li>
       <li>Review <strong>Exceptions</strong> &mdash; should be 0</li>
-      <li>Download the <strong>Import CSV</strong></li>
+      <li>Download the <strong>CSV</strong> &mdash; that locks the numbers</li>
     </ol>
   </div>
 </aside>"""
@@ -1286,14 +1296,14 @@ RESULT_SIDE = """
   <div class="sblock c4">
     <div class="slabel">Download</div>
     <div class="row" style="margin-top:2px;gap:8px">
-      <a href="{{ url_for('download', run_id=run_id, kind='csv') }}"><button>Import CSV</button></a>
-      <a href="{{ url_for('download', run_id=run_id, kind='xlsx') }}"><button class="ghost">Workbook</button></a>
+      <a href="{{ url_for('download', run_id=run_id, kind='csv') }}"><button>Download CSV</button></a>
+      <a href="{{ url_for('download', run_id=run_id, kind='xlsx') }}"><button class="sidealt">Download Excel</button></a>
     </div>
     <div class="snote">Numbers are reserved, not locked &mdash; they are only
       taken once you download. Leave without downloading and they come round again.</div>
     <div class="row" style="margin-top:10px;gap:8px">
       <a href="{{ url_for('index') }}" style="width:100%">
-        <button type="button" class="ghost" style="width:100%">&larr; Convert another statement</button></a>
+        <button type="button" class="sidealt" style="width:100%">&larr; Convert another statement</button></a>
     </div>
   </div>
 """
@@ -1867,8 +1877,11 @@ def run():
         return form_with_error(f"{type(exc).__name__}: {exc}", form)
 
     run_id = uuid.uuid4().hex
+    # Name the downloads after the statement they came from, so a folder of
+    # exports says which is which instead of a pile of journal.csv files.
     RUNS[run_id] = {"xlsx": out_xlsx, "csv": out_csv,
-                    "numberer": numberer, "committed": False}
+                    "numberer": numberer, "committed": False,
+                    "stem": Path(statement_path).stem}
 
     # --- present -------------------------------------------------------------
     total_debit = float(journal["Debit"].sum()) if not journal.empty else 0.0
@@ -1978,8 +1991,9 @@ def download(run_id: str, kind: str):
             # figures are still correct, only the reservation is missing.
             pass
 
+    stem = secure_filename(run.get("stem") or "journal").rstrip("_") or "journal"
     return send_file(run[kind], as_attachment=True,
-                     download_name=f"journal.{kind}")
+                     download_name=f"{stem} - import.{kind}")
 
 
 def main() -> None:
