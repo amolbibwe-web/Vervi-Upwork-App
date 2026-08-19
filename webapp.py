@@ -24,8 +24,10 @@ Bound to 127.0.0.1 only -- this is a local convenience UI, not a hosted service.
 from __future__ import annotations
 
 import argparse
+import io
 import itertools
 import os
+import zipfile
 import secrets
 import time
 import uuid
@@ -267,6 +269,11 @@ input[type=text]:focus,select:focus{outline:0;border-color:var(--brand);
 .drop .s{color:var(--muted);font-size:13px}
 .drop.has{border-style:solid;border-color:var(--teal);background:rgba(15,139,126,.07)}
 details{margin-top:16px;border-top:1px solid var(--line);padding-top:14px}
+/* A panel-level disclosure: no rule above it, and a heading-sized summary. */
+details.fold{margin:0;border-top:0;padding-top:0}
+details.fold>summary{font-size:16px;font-weight:700;color:var(--ink);letter-spacing:-.01em}
+details.fold>summary:hover{color:var(--brand)}
+details.fold[open]>summary{margin-bottom:14px}
 summary{cursor:pointer;font-size:14px;color:var(--muted);font-weight:500;
         list-style:none;display:flex;align-items:center;gap:6px}
 summary::-webkit-details-marker{display:none}
@@ -1058,6 +1065,8 @@ FORM_HTML = """<!doctype html><html><head><meta charset="utf-8">
 
   {% if not master_error %}
   <div class="panel tabwrap">
+    <details class="fold" {{ 'open' if notice }}>
+      <summary>Master database &mdash; {{ n_accounts }} accounts, {{ n_treatments }} treatments</summary>
     <div class="tabs">
       <button type="button" class="tab on" onclick="showTab(this,'m-acc')">Accounts<span class="n">{{ n_accounts }}</span></button>
       <button type="button" class="tab" onclick="showTab(this,'m-trt')">Treatments<span class="n">{{ n_treatments }}</span></button>
@@ -1101,6 +1110,7 @@ FORM_HTML = """<!doctype html><html><head><meta charset="utf-8">
         </div>
       </form>
     </div>
+    </details>
   </div>
   {% endif %}
 </main></div>
@@ -1286,18 +1296,15 @@ RESULT_SIDE = """
     <div class="srow"><span class="k">Difference</span>
       <span class="v big {{ 'ok' if balanced else 'bad' }}">{{ difference }}</span></div>
   </div>
-  <div class="sblock c2">
-    <div class="slabel">Settings used</div>
-    <div class="srow"><span class="k">IGST</span><span class="v">{{ igst_pct }}%</span></div>
-    <div class="srow"><span class="k">Rates</span><span class="v">{{ fx_note }}</span></div>
-    <div class="srow"><span class="k">Sales</span><span class="v">{{ income_mode }}</span></div>
-    <div class="srow"><span class="k">Doc numbers</span><span class="v">{{ n_docs }} reserved</span></div>
-  </div>
   <div class="sblock c4">
     <div class="slabel">Download</div>
     <div class="row" style="margin-top:2px;gap:8px">
-      <a href="{{ url_for('download', run_id=run_id, kind='csv') }}"><button>Download CSV</button></a>
-      <a href="{{ url_for('download', run_id=run_id, kind='xlsx') }}"><button class="sidealt">Download Excel</button></a>
+      <a href="{{ url_for('download', run_id=run_id, kind='csv') }}" style="width:100%">
+        <button style="width:100%">Download import CSV</button></a>
+    </div>
+    <div class="row" style="margin-top:8px;gap:8px">
+      <a href="{{ url_for('download', run_id=run_id, kind='split') }}" style="width:100%">
+        <button class="sidealt" style="width:100%">JE + Sales as two files</button></a>
     </div>
     <div class="snote">Numbers are reserved, not locked &mdash; they are only
       taken once you download. Leave without downloading and they come round again.</div>
@@ -1305,6 +1312,13 @@ RESULT_SIDE = """
       <a href="{{ url_for('index') }}" style="width:100%">
         <button type="button" class="sidealt" style="width:100%">&larr; Convert another statement</button></a>
     </div>
+  </div>
+  <div class="sblock c2">
+    <div class="slabel">Settings used</div>
+    <div class="srow"><span class="k">IGST</span><span class="v">{{ igst_pct }}%</span></div>
+    <div class="srow"><span class="k">Rates</span><span class="v">{{ fx_note }}</span></div>
+    <div class="srow"><span class="k">Sales</span><span class="v">{{ income_mode }}</span></div>
+    <div class="srow"><span class="k">Doc numbers</span><span class="v">{{ n_docs }} reserved</span></div>
   </div>
 """
 
@@ -1881,7 +1895,8 @@ def run():
     # exports says which is which instead of a pile of journal.csv files.
     RUNS[run_id] = {"xlsx": out_xlsx, "csv": out_csv,
                     "numberer": numberer, "committed": False,
-                    "stem": Path(statement_path).stem}
+                    "stem": Path(statement_path).stem,
+                    "import_frame": import_frame}
 
     # --- present -------------------------------------------------------------
     total_debit = float(journal["Debit"].sum()) if not journal.empty else 0.0
@@ -1973,10 +1988,31 @@ def fx_verify(rate_date: str):
         archive_url=ARCHIVE_URL)
 
 
+def split_zip(import_frame: pd.DataFrame, stem: str) -> io.BytesIO:
+    """One archive holding the JE rows and the Sales rows as separate CSVs.
+
+    Some systems want each voucher type imported on its own, and splitting by
+    hand after the fact invites mistakes -- so the tool does it, from the same
+    frame the combined file comes from.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for kind in (VOUCHER_JE, VOUCHER_SALES):
+            part = import_frame[import_frame["Type"] == kind]
+            # An empty part still gets a file, headers and all, so a missing
+            # voucher type is visible rather than silently absent.
+            zf.writestr(f"{stem} - {kind}.csv",
+                        part.to_csv(index=False).encode("utf-8-sig"))
+    buf.seek(0)
+    return buf
+
+
 @app.route("/download/<run_id>/<kind>")
 def download(run_id: str, kind: str):
     run = RUNS.get(run_id)
-    if not run or kind not in ("xlsx", "csv") or not run[kind].exists():
+    if not run or kind not in ("xlsx", "csv", "split"):
+        abort(404)
+    if kind in ("xlsx", "csv") and not run[kind].exists():
         abort(404)
 
     # Downloading is the moment the numbers leave the tool and become real, so
@@ -1992,6 +2028,12 @@ def download(run_id: str, kind: str):
             pass
 
     stem = secure_filename(run.get("stem") or "journal").rstrip("_") or "journal"
+
+    if kind == "split":
+        return send_file(split_zip(run["import_frame"], stem), as_attachment=True,
+                         mimetype="application/zip",
+                         download_name=f"{stem} - import (JE + Sales).zip")
+
     return send_file(run[kind], as_attachment=True,
                      download_name=f"{stem} - import.{kind}")
 
