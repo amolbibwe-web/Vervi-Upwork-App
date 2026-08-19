@@ -90,6 +90,11 @@ DEFAULT_MASTER_MAPPING = Path(__file__).parent / "master" / "mapping_master.csv"
 #: client, a new month -- continues the series instead of restarting it.
 DEFAULT_DOC_REGISTRY = Path(__file__).parent / "master" / "doc_registry.csv"
 
+#: Opening positions, used when no registry exists yet. This one IS committed to
+#: the repo, so a hosted instance with an empty disk still starts at the right
+#: number rather than at 001.
+DOC_REGISTRY_SEED_NAME = "doc_registry_seed.csv"
+
 #: Cell token in Sheet2 meaning "substitute the wallet ledger from Table B".
 GL_PLACEHOLDER = "gl name"
 
@@ -905,9 +910,19 @@ class DocumentNumberer:
             self._load_registry(registry_path)
 
     def _load_registry(self, path: Path) -> None:
-        """Resume each prefix's counter from the highest number already issued."""
+        """Resume each prefix's counter from the highest number already issued.
+
+        When there is no registry yet -- a fresh machine, or a hosted instance
+        whose disk was wiped -- fall back to the seed file beside it. The seed is
+        committed to the repo and records the opening position, so a deployment
+        starts from the agreed number instead of 001.
+        """
         if not path.exists():
-            return
+            seed = path.with_name(DOC_REGISTRY_SEED_NAME)
+            if seed.exists():
+                path = seed
+            else:
+                return
         try:
             with path.open(newline="", encoding="utf-8") as handle:
                 for row in csv.DictReader(handle):
