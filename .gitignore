@@ -11,6 +11,9 @@ master/posted_refs.csv
 fx_cache.csv
 out/
 exports/
+# (exports_seed/ IS committed, at the owner's explicit request, so the hosted
+#  app shows the converted-statement list. It holds client names and amounts,
+#  and this repo is public.)
 publish/
 
 # --- runtime artefacts from autostart.ps1 --------------------------------

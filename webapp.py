@@ -109,6 +109,27 @@ HISTORY_COLUMNS = ("converted_at", "statement", "rows_read", "vouchers",
                    "journal_lines", "duplicates",
                    "sales_from", "sales_to", "je_from", "je_to", "folder")
 
+#: Committed copy of the archive, restored onto an empty exports folder. The
+#: hosted disk is wiped on every restart, so without this the converted-statement
+#: list there is always empty.  NOTE: the files under it hold client names and
+#: amounts and the repo is public -- committed at the owner's explicit request.
+EXPORTS_SEED_DIR = HERE / "exports_seed"
+
+
+def seed_exports() -> None:
+    """Restore the seed archive when there is no history at all.
+
+    Only ever runs against an empty exports folder, so a real conversion, a
+    rename or a deletion is never undone by it.
+    """
+    if HISTORY_FILE.exists() or not EXPORTS_SEED_DIR.is_dir():
+        return
+    try:
+        shutil.copytree(EXPORTS_SEED_DIR, EXPORTS_DIR, dirs_exist_ok=True)
+    except OSError:
+        pass  # a read-only disk is not worth refusing to start over
+
+
 #: run id -> {"xlsx": Path, "csv": Path}, so downloads survive the redirect.
 RUNS: dict[str, dict[str, Path]] = {}
 
@@ -2315,6 +2336,9 @@ def edit_ref():
     return redirect(url_for("history",
                             added=f"Ref ID {clean_text(old_ref)} changed to "
                                   f"{clean_text(request.form.get('new_ref', ''))}"))
+
+
+seed_exports()
 
 
 @app.route("/history")
