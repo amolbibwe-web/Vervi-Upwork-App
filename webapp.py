@@ -163,7 +163,7 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font);
 
 /* ---- shell: fixed sidebar + scrolling main ---- */
 .shell{display:flex;min-height:100vh}
-.side{width:280px;flex:0 0 280px;color:var(--side-ink);padding:24px 20px;
+.side{width:326px;flex:0 0 326px;color:var(--side-ink);padding:24px 20px;
       position:sticky;top:0;height:100vh;overflow-y:auto;
       background:linear-gradient(168deg,#5b4bf5 0%,#6d43e8 38%,#3f2d9e 78%,#241a63 100%);
       position:sticky}
@@ -174,6 +174,14 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font);
              radial-gradient(300px 240px at 0% 82%,rgba(45,212,191,.22),transparent 70%)}
 .side>*{position:relative;z-index:1}
 .main{flex:1;min-width:0;padding:0 32px 60px}
+/* Document numbers are long; stacking label over value keeps them
+   on one line instead of wrapping mid-number. */
+.sstack{padding:7px 0}
+.sstack .k{display:block;font-size:11.5px;color:var(--side-muted)}
+.sstack .num{display:block;font-family:var(--mono);font-size:15px;
+  font-weight:500;color:#fff;letter-spacing:-.01em;margin-top:2px}
+.sstack .was{display:block;font-size:11px;color:var(--side-muted);
+  opacity:.85;margin-top:1px}
 
 .logo{display:flex;align-items:center;gap:12px;margin-bottom:22px}
 .logo .mark{width:42px;height:42px;border-radius:12px;flex:0 0 42px;
@@ -485,11 +493,6 @@ code{font-family:var(--mono);font-size:12.5px;background:var(--panel-2);padding:
 #: a white flash while the rest of the page loads.
 THEME_BOOT = ("<script>try{var t=localStorage.getItem('vervi-theme');"
               "if(t)document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>")
-
-#: Leading the results top bar: the way back to a new run. Always visible, so
-#: nobody has to hunt for it or reload the page by hand.
-BACK_BTN = """<a class="backbtn" href="{{ url_for('index') }}">
-    <span aria-hidden="true">&larr;</span> New journal</a>"""
 
 #: Rendered into the top-right of every signed-in page.
 TOPRIGHT = """<div class="topright">
@@ -926,27 +929,6 @@ SIDEBAR = """<aside class="side">
          <div class="co">""" + COMPANY + """</div></div>
   </a>
   {% block sidebody %}{% endblock %}
-  <div class="sblock c2">
-    <div class="slabel">History</div>
-    <div class="srow"><span class="k">Statements converted</span>
-      <span class="v big">{{ n_history }}</span></div>
-    <div class="row" style="margin-top:8px">
-      <a href="{{ url_for('history') }}" style="width:100%">
-        <button type="button" class="sidealt" style="width:100%">See converted files</button></a>
-    </div>
-  </div>
-  <div class="sblock c4">
-    <div class="slabel">How to import</div>
-    <ol class="steps-list">
-      <li>On Upwork: <strong>Reports &rarr; Transaction History</strong></li>
-      <li>Pick the period, then <strong>Download CSV</strong></li>
-      <li>Drop that file into <strong>Upload</strong></li>
-      <li>Check every account appears below</li>
-      <li>Hit <strong>Generate journal</strong></li>
-      <li>Review <strong>Exceptions</strong> &mdash; should be 0</li>
-      <li>Download the <strong>CSV</strong> &mdash; that locks the numbers</li>
-    </ol>
-  </div>
 </aside>"""
 
 #: One dialog serves both tabs; JS shows whichever fieldset applies.
@@ -998,34 +980,29 @@ EDIT_MODAL = """
 </div>"""
 
 FORM_SIDE = """
-  <div class="sblock c1">
-    <div class="slabel">Master database</div>
-    <div class="srow"><span class="k">Accounts</span><span class="v">{{ n_accounts }}</span></div>
-    <div class="srow"><span class="k">Treatments</span><span class="v">{{ n_treatments }}</span></div>
-    <div class="snote">Ledgers are read from <code>{{ master_path }}</code>.
-      Add a row there to add a freelancer.</div>
+  <div class="sblock c3">
+    <div class="slabel">Next document numbers</div>
+    {% if reg.ok %}
+    <div class="sstack">
+      <span class="k">Sales</span>
+      <span class="num">{{ reg.sales_next }}</span>
+      <span class="was">after {{ reg.sales_last or 'none yet' }}</span>
+    </div>
+    <div class="sstack">
+      <span class="k">JE &middot; {{ reg.je_month }}</span>
+      <span class="num">{{ reg.je_next }}</span>
+      <span class="was">after {{ reg.je_last or 'none yet' }}</span>
+    </div>
+    {% endif %}
   </div>
   <div class="sblock c2">
-    <div class="slabel">Defaults</div>
-    <div class="srow"><span class="k">Currency</span><span class="v">INR</span></div>
-    <div class="srow"><span class="k">IGST</span><span class="v">18%</span></div>
-    <div class="srow"><span class="k">Rates</span><span class="v">RBI, per date</span></div>
-    <div class="srow"><span class="k">Sales</span><span class="v">2 entries</span></div>
-  </div>
-  <div class="sblock c3">
-    <div class="slabel">Document numbers</div>
-    {% if reg.ok %}
-    <div class="srow"><span class="k">Last Sales used</span>
-      <span class="v">{{ reg.sales_last or '&mdash;'|safe }}</span></div>
-    <div class="srow"><span class="k">Next Sales</span>
-      <span class="v big">{{ reg.sales_next }}</span></div>
-    <div class="srow"><span class="k">Last JE used ({{ reg.je_month }})</span>
-      <span class="v">{{ reg.je_last or '&mdash;'|safe }}</span></div>
-    <div class="srow"><span class="k">Next JE</span>
-      <span class="v big">{{ reg.je_next }}</span></div>
-    {% endif %}
-    <div class="snote">Numbering continues from the last one you actually
-      exported &mdash; a new statement never reuses a number.</div>
+    <div class="slabel">History</div>
+    <div class="srow"><span class="k">Statements converted</span>
+      <span class="v big">{{ n_history }}</span></div>
+    <div class="row" style="margin-top:9px">
+      <a href="{{ url_for('history') }}" style="width:100%">
+        <button type="button" class="sidealt" style="width:100%">See converted files</button></a>
+    </div>
   </div>
 """
 
@@ -1371,10 +1348,7 @@ RESULT_SIDE = """
     </div>
     <div class="snote">Numbers are reserved, not locked &mdash; they are only
       taken once you download. Leave without downloading and they come round again.</div>
-    <div class="row" style="margin-top:10px;gap:8px">
-      <a href="{{ url_for('index') }}" style="width:100%">
-        <button type="button" class="sidealt" style="width:100%">&larr; Convert another statement</button></a>
-    </div>
+
   </div>
   <div class="sblock c2">
     <div class="slabel">Settings used</div>
@@ -1395,8 +1369,7 @@ RESULT_HTML = """<!doctype html><html><head><meta charset="utf-8">
 <main class="main">
   <div class="top"><h1>Journal ready</h1>
     <span class="s">{{ vouchers }} vouchers &middot; {{ total_lines }} lines</span>
-    """ + TOPRIGHT.replace('<div class="topright">',
-                           '<div class="topright">' + BACK_BTN) + """</div>
+    """ + TOPRIGHT + """</div>
 
   {% if balanced %}
   <div class="banner ok"><span>&#10004;</span><div><strong>Balanced.</strong>
@@ -2237,19 +2210,12 @@ HISTORY_HTML = """<!doctype html><html><head><meta charset="utf-8">
     <div class="snote">Only downloaded runs are kept &mdash; the same rule the
       document numbers follow.</div>
   </div>
-  <div class="sblock c4">
-    <div class="slabel">Go</div>
-    <div class="row" style="margin-top:2px">
-      <a href="{{ url_for('index') }}" style="width:100%">
-        <button type="button" style="width:100%">&larr; New journal</button></a>
-    </div>
-  </div>
+
 </aside>
 <main class="main">
   <div class="top"><h1>Converted statements</h1>
     <span class="s">what has been imported, and the files it produced</span>
-    """ + TOPRIGHT.replace('<div class="topright">',
-                           '<div class="topright">' + BACK_BTN) + """</div>
+    """ + TOPRIGHT + """</div>
 
   {% if error %}<div class="banner err"><span>&#9888;</span>
   <div><strong>Couldn't do that.</strong> {{ error }}</div></div>{% endif %}
