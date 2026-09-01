@@ -327,6 +327,10 @@ a:hover{text-decoration:underline}
 .tab .n{background:var(--line-2);color:var(--muted);border-radius:99px;padding:1px 7px;
         font-size:11px;margin-left:5px}
 .tab.on .n{background:var(--brand-soft);color:var(--brand)}
+/* A tab holding duplicates is a finding, not just another view. */
+.tab.has-dup{color:var(--warn)}
+.tab.has-dup .n{background:var(--warn-bg);color:var(--warn)}
+.tab.has-dup.on{color:var(--warn);border-bottom-color:var(--warn)}
 .pane{display:none} .pane.on{display:block}
 
 /* ---- tables ---- */
@@ -1382,7 +1386,7 @@ RESULT_HTML = """<!doctype html><html><head><meta charset="utf-8">
   {% if duplicates %}<div class="banner warn"><span>&#128260;</span>
   <div><strong>{{ duplicates }} row{{ '' if duplicates == 1 else 's' }} already imported.</strong>
   Matched on Ref ID against earlier runs and skipped, so nothing is posted twice.
-  See the <strong>Already imported</strong> tab for the Ref IDs and when they
+  See the <strong>Duplicate</strong> tab for the Ref IDs and when they
   went in.</div></div>{% endif %}
 
   {% if fx_warnings %}<div class="banner warn"><span>&#128197;</span>
@@ -1396,16 +1400,16 @@ RESULT_HTML = """<!doctype html><html><head><meta charset="utf-8">
       <button type="button" class="tab" onclick="showTab(this,'p-rec')">Reconciliation</button>
       <button type="button" class="tab" onclick="showTab(this,'p-fx')">FX audit<span class="n">{{ n_fx }}</span></button>
       <button type="button" class="tab" onclick="showTab(this,'p-exc')">Exceptions<span class="n">{{ n_exc }}</span></button>
-      <button type="button" class="tab" onclick="showTab(this,'p-dup')">Already imported<span class="n">{{ n_dup }}</span></button>
       <button type="button" class="tab" onclick="showTab(this,'p-skp')">Skipped<span class="n">{{ n_skip }}</span></button>
+      <button type="button" class="tab{{ ' has-dup' if n_dup }}" onclick="showTab(this,'p-dup')">Duplicate<span class="n">{{ n_dup }}</span></button>
     </div>
     <div id="p-imp" class="pane on">{{ import_table|safe }}</div>
     <div id="p-jrn" class="pane">{{ journal_table|safe }}</div>
     <div id="p-rec" class="pane">{{ recon_table|safe }}</div>
     <div id="p-fx"  class="pane">{{ fx_audit_table|safe }}</div>
     <div id="p-exc" class="pane">{{ exceptions_table|safe }}</div>
-    <div id="p-dup" class="pane">{{ duplicates_table|safe }}</div>
     <div id="p-skp" class="pane">{{ skipped_table|safe }}</div>
+    <div id="p-dup" class="pane">{{ duplicates_table|safe }}</div>
   </div>
 </main></div><script>""" + TAB_JS + """</script></body></html>"""
 
@@ -2011,6 +2015,17 @@ def run():
             is_dup = all_skipped["Reason"].astype(str).str.startswith("Already imported")
             duplicate_rows = all_skipped[is_dup].copy()
             skipped = all_skipped[~is_dup].copy()
+            # Break the reason sentence into columns, so the tab can be read and
+            # filtered like a register rather than a list of prose.
+            if not duplicate_rows.empty:
+                reason = duplicate_rows["Reason"].astype(str)
+                duplicate_rows["First imported"] = reason.str.extract(
+                    r"Already imported on (\S+)")
+                duplicate_rows["Posted as"] = reason.str.extract(r" as (\S+)$")
+                duplicate_rows = duplicate_rows[[
+                    c for c in ("Statement Row", "Ref ID", "Transaction Type",
+                                "Amount USD", "First imported", "Posted as")
+                    if c in duplicate_rows.columns]]
         else:
             duplicate_rows = pd.DataFrame()
             skipped = all_skipped
