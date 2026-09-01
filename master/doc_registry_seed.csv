@@ -1,2 +1,3 @@
 document_number,type,date,prefix,seq,issued_at,source
-26-27/VASL/U/025,Sales,2026-04-01,26-27/VASL/U/,25,2026-04-01 00:00:00,opening position - last invoice actually issued was 025
+26-27/VASL/U/025,Sales,2026-04-01,26-27/VASL/U/,25,2026-04-01 00:00:00,opening position - last Sales invoice actually issued was 025
+26-27/LLP/Aug/021,JE,2026-08-31,26-27/LLP/Aug/,21,2026-08-31 00:00:00,opening position - last August JE actually issued was 021
