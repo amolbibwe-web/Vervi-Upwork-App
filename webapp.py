@@ -855,6 +855,17 @@ document.addEventListener('wheel', function(e){
   e.preventDefault();
 }, {passive: false});
 
+// The name typed in the sidebar becomes the downloaded file's name.
+function renameDownloads(name){
+  var clean = (name || '').trim();
+  ['dl-csv','dl-xlsx','dl-split'].forEach(function(id){
+    var a = document.getElementById(id);
+    if (!a) return;
+    var base = a.href.split('?')[0];
+    a.href = clean ? base + '?name=' + encodeURIComponent(clean) : base;
+  });
+}
+
 function showTab(btn, id){
   var root = btn.closest('.tabwrap');
   root.querySelectorAll('.tab').forEach(function(t){ t.classList.remove('on'); });
@@ -1342,13 +1353,21 @@ RESULT_SIDE = """
   </div>
   <div class="sblock c4">
     <div class="slabel">Download</div>
-    <div class="row" style="margin-top:2px;gap:8px">
-      <a href="{{ url_for('download', run_id=run_id, kind='csv') }}" style="width:100%">
+    <label for="dl-name" style="margin-top:2px">File name</label>
+    <input type="text" id="dl-name" value="{{ export_name }}"
+           style="width:100%;margin-bottom:10px"
+           oninput="renameDownloads(this.value)">
+    <div class="row" style="margin-top:0;gap:8px">
+      <a id="dl-csv" href="{{ url_for('download', run_id=run_id, kind='csv') }}" style="width:100%">
         <button style="width:100%">Download import CSV</button></a>
     </div>
     <div class="row" style="margin-top:8px;gap:8px">
-      <a href="{{ url_for('download', run_id=run_id, kind='split') }}" style="width:100%">
-        <button class="sidealt" style="width:100%">JE + Sales as two files</button></a>
+      <a id="dl-xlsx" href="{{ url_for('download', run_id=run_id, kind='xlsx') }}" style="width:100%">
+        <button class="sidealt" style="width:100%">Download import Excel</button></a>
+    </div>
+    <div class="row" style="margin-top:8px;gap:8px">
+      <a id="dl-split" href="{{ url_for('download', run_id=run_id, kind='split') }}" style="width:100%">
+        <button class="sidealt" style="width:100%">JE + Sales, both formats</button></a>
     </div>
     <div class="snote">Numbers are reserved, not locked &mdash; they are only
       taken once you download. Leave without downloading and they come round again.</div>
@@ -1440,7 +1459,8 @@ _table_seq = itertools.count(1)
 def html_table(frame: pd.DataFrame, empty_message: str,
                numeric: tuple[str, ...] = (), voucher_breaks: bool = False,
                precise: tuple[str, ...] = (), filterable: bool = True,
-               links: dict | None = None, actions=None) -> str:
+               links: dict | None = None, actions=None,
+               hidden: tuple[str, ...] = ()) -> str:
     """Render a DataFrame as a styled table.
 
     Hand-rolled rather than `DataFrame.to_html` so amounts can be right-aligned,
@@ -1452,6 +1472,10 @@ def html_table(frame: pd.DataFrame, empty_message: str,
         return f'<div class="scroll"><div class="empty">{empty_message}</div></div>'
 
     table_id = f"t{next(_table_seq)}"
+    # Columns the action needs but the reader does not, e.g. which folder a file
+    # lives in. Kept on the frame, left out of the rendering.
+    shown = [c for c in frame.columns if c not in hidden]
+    display = frame[shown]
     if filterable:
         # Filter control lives inside the heading, next to the name -- the column
         # and the way to narrow it are the same thing, so they belong together.
@@ -1459,9 +1483,9 @@ def html_table(frame: pd.DataFrame, empty_message: str,
             f'<th><span class="thin"><span>{escape(str(c))}</span>'
             f'<button type="button" class="fbtn" onclick="openFilter(this)" '
             f'aria-label="Filter {escape(str(c), quote=True)}">{FILTER_ICON}</button>'
-            f"</span></th>" for c in frame.columns)
+            f"</span></th>" for c in display.columns)
     else:
-        head = "".join(f"<th>{escape(str(c))}</th>" for c in frame.columns)
+        head = "".join(f"<th>{escape(str(c))}</th>" for c in display.columns)
     if actions:
         head += '<th class="actcol">Edit</th>'
     body: list[str] = []
@@ -1476,12 +1500,12 @@ def html_table(frame: pd.DataFrame, empty_message: str,
             previous_doc = row[doc_col]
         # A totals row is a summary of the table, not a row of it -- filtering
         # must never hide it, or the figures stop adding up on screen.
-        if str(row.get(frame.columns[0], "")) == "TOTAL":
+        if str(row.get(display.columns[0], "")) == "TOTAL":
             classes.append("total")
             classes.append("keep")
 
         cells = []
-        for col in frame.columns:
+        for col in display.columns:
             value = row[col]
             if col == "Dr/Cr" and str(value) in ("Dr", "Cr"):
                 cells.append(f'<td><span class="pill {str(value).lower()}">{value}</span></td>')
@@ -1598,13 +1622,18 @@ def archive_run(run: dict) -> None:
     for kind in ("csv", "xlsx"):
         src = run.get(kind)
         if src and src.exists():
-            shutil.copy2(src, folder / f"{stem} - import.{kind}")
+            shutil.copy2(src, folder / f"{stem} - Import.{kind}")
     frame = run.get("import_frame")
     if frame is not None and not frame.empty:
+        # Each part in both formats: some people open these in Excel, some feed
+        # them straight to an importer.
         for kind in (VOUCHER_JE, VOUCHER_SALES):
             part = frame[frame["Type"] == kind]
             part.to_csv(folder / f"{stem} - {kind}.csv", index=False,
                         encoding="utf-8-sig")
+            with pd.ExcelWriter(folder / f"{stem} - {kind}.xlsx",
+                                engine="openpyxl") as writer:
+                part.to_excel(writer, sheet_name=kind, index=False)
 
     row = {
         "converted_at": stamp.strftime("%Y-%m-%d %H:%M:%S"),
@@ -2089,6 +2118,7 @@ def run():
         fx_note=("manual flat" if fx_source == "manual"
                  else ("n/a" if currency == "USD" else "RBI, per date")),
         fx_warnings=fx_provider.warnings,
+        export_name=Path(statement_path).stem,
         rows_read=len(statement),
         vouchers=journal["Document Number"].nunique() if not journal.empty else 0,
         total_lines=len(journal), n_docs=n_docs,
@@ -2180,6 +2210,10 @@ def split_zip(import_frame: pd.DataFrame, stem: str) -> io.BytesIO:
             # voucher type is visible rather than silently absent.
             zf.writestr(f"{stem} - {kind}.csv",
                         part.to_csv(index=False).encode("utf-8-sig"))
+            sheet = io.BytesIO()
+            with pd.ExcelWriter(sheet, engine="openpyxl") as writer:
+                part.to_excel(writer, sheet_name=kind, index=False)
+            zf.writestr(f"{stem} - {kind}.xlsx", sheet.getvalue())
     buf.seek(0)
     return buf
 
@@ -2235,18 +2269,10 @@ HISTORY_HTML = """<!doctype html><html><head><meta charset="utf-8">
       {% else %}
       {{ runs_table|safe }}
       <div class="addrow">
-        <div class="addhead">Files kept for each conversion</div>
-        {% for r in runs %}
-        <div class="row" style="margin-top:0;margin-bottom:9px;align-items:baseline">
-          <span class="hint" style="min-width:190px">{{ r.statement }}
-            <span style="opacity:.7">&middot; {{ r.converted_at }}</span></span>
-          {% for f in r.files %}
-          <a href="{{ url_for('history_file', folder=r.folder, name=f) }}">
-            <button class="ghost">{{ f.split(' - ')[-1] }}</button></a>
-          {% endfor %}
-        </div>
-        {% endfor %}
+        <div class="addhead">Every file each conversion produced &mdash; the JE and
+          Sales halves are kept apart so each series can be tracked on its own.</div>
       </div>
+      {{ files_table|safe }}
       {% endif %}
     </div>
 
@@ -2286,23 +2312,18 @@ HISTORY_HTML = """<!doctype html><html><head><meta charset="utf-8">
 // new value, once to confirm the swap in plain words.
 function editRef(btn){
   var current = btn.dataset.ref || '';
+  var nl = String.fromCharCode(10);
   var next = window.prompt(
-    'Change this Ref ID.
-
-Current: ' + current +
-    '
-
-This rewrites which transactions count as already imported.', current);
+    'Change this Ref ID.' + nl + nl +
+    'Current: ' + current + nl + nl +
+    'This rewrites which transactions count as already imported.', current);
   if (next === null) return;
   next = next.trim();
   if (!next || next === current) return;
   if (!window.confirm(
-      'Confirm the change?
-
-  ' + current + '   →   ' + next +
-      '
-
-Transactions carrying ' + current +
+      'Confirm the change?' + nl + nl +
+      '  ' + current + '  to  ' + next + nl + nl +
+      'Transactions carrying ' + current +
       ' will no longer be recognised as imported.')) return;
   document.getElementById('ref-old').value = current;
   document.getElementById('ref-new').value = next;
@@ -2395,6 +2416,28 @@ def history():
         "JE to": r.get("je_to", ""),
     } for i, r in enumerate(runs, start=1)])
 
+    # One row per file, so the JE and Sales halves of a statement are visible
+    # as separate lines rather than a row of buttons.
+    file_rows = []
+    for r in runs:
+        for f in r.get("files", []):
+            part = f.rsplit(" - ", 1)[-1]
+            name, _, ext = part.rpartition(".")
+            file_rows.append({
+                "Statement": r.get("statement", ""),
+                "Converted at": r.get("converted_at", ""),
+                "Part": name or part,
+                "Format": ext.upper(),
+                "File": f,
+                "_folder": r.get("folder", ""),
+            })
+    files_frame = pd.DataFrame(file_rows)
+
+    def file_action(row):
+        href = url_for("history_file", folder=row["_folder"], name=row["File"])
+        return (f'<a href="{escape(href, quote=True)}">'
+                f'<button type="button" class="editbtn">Download</button></a>')
+
     ref_rows = read_posted_refs(DEFAULT_POSTED_LEDGER)
     refs_frame = pd.DataFrame([{
         "Ref ID": r.get("ref_id", ""),
@@ -2414,6 +2457,9 @@ def history():
         HISTORY_HTML, css=BASE_CSS, runs=runs, n_refs=len(ref_rows),
         error=request.args.get("error"), notice=request.args.get("added"),
         runs_table=html_table(runs_frame, "Nothing converted yet."),
+        files_table=html_table(files_frame, "No files yet.",
+                               actions=file_action if file_rows else None,
+                               hidden=("_folder",)),
         refs_table=html_table(
             refs_frame,
             "No Ref IDs on record yet — they are added when you download a "
@@ -2462,7 +2508,10 @@ def download(run_id: str, kind: str):
             # figures are still correct, only the reservation is missing.
             pass
 
-    stem = secure_filename(run.get("stem") or "journal").rstrip("_") or "journal"
+    # A name typed in the sidebar wins; otherwise the statement's own name.
+    stem = secure_filename(
+        clean_text(request.args.get("name", "")) or run.get("stem") or "journal"
+    ).rstrip("_") or "journal"
 
     if kind == "split":
         return send_file(split_zip(run["import_frame"], stem), as_attachment=True,
