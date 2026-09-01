@@ -976,6 +976,77 @@ class PostedLedger:
         return count
 
 
+def read_posted_refs(path: Path) -> list[dict]:
+    """Every Ref ID on record, newest first."""
+    if not path.exists():
+        return []
+    try:
+        with path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+    except OSError:
+        return []
+    rows.reverse()
+    return rows
+
+
+def import_posted_refs(path: Path, refs: list[str], note: str = "") -> tuple[int, int]:
+    """Add Ref IDs that were imported before this tool existed.
+
+    Returns (added, already_known). Only the Ref ID matters -- everything else
+    is recorded as an opening entry, because there is no journal behind these.
+    """
+    known = {norm_key(r.get("ref_id", "")) for r in read_posted_refs(path)}
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    fresh, seen = [], 0
+    for ref in refs:
+        ref = clean_text(ref)
+        key = norm_key(ref)
+        if not key:
+            continue
+        if key in known:
+            seen += 1
+            continue
+        known.add(key)
+        fresh.append({"ref_id": ref, "transaction_id": "", "date": "",
+                      "transaction_type": "", "amount_usd": "",
+                      "document_number": "", "source": note or "loaded manually",
+                      "posted_at": stamp})
+    if fresh:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        exists = path.exists()
+        with path.open("a", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=POSTED_COLUMNS)
+            if not exists:
+                writer.writeheader()
+            writer.writerows(fresh)
+    return len(fresh), seen
+
+
+def update_posted_ref(path: Path, old_ref: str, new_ref: str) -> None:
+    """Correct one Ref ID in place."""
+    old_ref, new_ref = clean_text(old_ref), clean_text(new_ref)
+    if not new_ref:
+        raise ValueError("The new Ref ID cannot be blank")
+    rows = list(reversed(read_posted_refs(path)))
+    if not rows:
+        raise ValueError("There are no Ref IDs on record")
+    keys = {norm_key(r.get("ref_id", "")) for r in rows}
+    if norm_key(new_ref) != norm_key(old_ref) and norm_key(new_ref) in keys:
+        raise ValueError(f"Ref ID '{new_ref}' is already on record")
+    hit = False
+    for r in rows:
+        if norm_key(r.get("ref_id", "")) == norm_key(old_ref):
+            r["ref_id"] = new_ref
+            hit = True
+    if not hit:
+        raise ValueError(f"Ref ID '{old_ref}' is not on record")
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=POSTED_COLUMNS)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({k: r.get(k, "") for k in POSTED_COLUMNS})
+
+
 class DocumentNumberer:
     """Issues document numbers like 26-27/LLP/Jul/001 and 26-27/V/RE-U/001.
 

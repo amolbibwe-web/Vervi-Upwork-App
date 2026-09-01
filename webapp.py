@@ -53,6 +53,8 @@ from upwork_to_journal import (DEFAULT_DOC_REGISTRY, DEFAULT_DOC_SERIES,
                                Reporter, add_treatment, add_wallet,
                                build_import_frame, build_journal,
                                PostedLedger, DEFAULT_POSTED_LEDGER,
+                               import_posted_refs, read_posted_refs,
+                               update_posted_ref,
                                build_reconciliation, clean_text, delete_treatment,
                                delete_wallet, load_mapping, load_statement,
                                to_decimal, update_treatment, update_wallet,
@@ -103,7 +105,8 @@ MASTER_MAPPING = HERE / "master" / "mapping_master.csv"
 EXPORTS_DIR = HERE / "exports"
 HISTORY_FILE = EXPORTS_DIR / "history.csv"
 HISTORY_COLUMNS = ("converted_at", "statement", "rows_read", "vouchers",
-                   "journal_lines", "duplicates", "doc_numbers", "folder")
+                   "journal_lines", "duplicates",
+                   "sales_from", "sales_to", "je_from", "je_to", "folder")
 
 #: run id -> {"xlsx": Path, "csv": Path}, so downloads survive the redirect.
 RUNS: dict[str, dict[str, Path]] = {}
@@ -490,6 +493,12 @@ BACK_BTN = """<a class="backbtn" href="{{ url_for('index') }}">
 
 #: Rendered into the top-right of every signed-in page.
 TOPRIGHT = """<div class="topright">
+  <a class="iconbtn" href="{{ url_for('index') }}" title="Home" aria-label="Home">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+         stroke-linecap="round" stroke-linejoin="round" style="width:17px;height:17px">
+      <path d="M3 10.5 12 3l9 7.5"/><path d="M5.5 9.5V20h13V9.5"/>
+      <path d="M9.75 20v-5.5h4.5V20"/></svg>
+  </a>
   <button type="button" class="iconbtn" onclick="toggleTheme()"
           title="Switch between light and dark" aria-label="Switch theme">
     <span class="moon">&#9789;</span><span class="sun">&#9788;</span>
@@ -900,11 +909,11 @@ LOCK_ICON = (
 
 
 SIDEBAR = """<aside class="side">
-  <div class="logo">
+  <a class="logo" href="{{ url_for('index') }}" style="text-decoration:none;color:inherit">
     <div class="mark">""" + BOOK_ICON + """</div>
     <div><div class="nm">""" + APP_NAME + """</div>
          <div class="co">""" + COMPANY + """</div></div>
-  </div>
+  </a>
   {% block sidebody %}{% endblock %}
   <div class="sblock c2">
     <div class="slabel">History</div>
@@ -1558,16 +1567,21 @@ def save_upload(file_storage, folder: Path) -> Path | None:
     return target
 
 
-def doc_range(journal: pd.DataFrame) -> str:
-    """A one-line summary of the numbers a run used, for the history."""
+def doc_range(journal: pd.DataFrame) -> dict:
+    """First and last number each series used, kept apart.
+
+    Sales and JE are tracked separately because they are separate registers --
+    reading "which invoices did that statement consume" should not mean parsing
+    one run-together string.
+    """
+    out = {"sales_from": "", "sales_to": "", "je_from": "", "je_to": ""}
     if journal.empty:
-        return ""
-    parts = []
-    for kind in (VOUCHER_SALES, VOUCHER_JE):
+        return out
+    for kind, key in ((VOUCHER_SALES, "sales"), (VOUCHER_JE, "je")):
         docs = sorted(journal[journal["Voucher Type"] == kind]["Document Number"].unique())
         if docs:
-            parts.append(docs[0] if len(docs) == 1 else f"{docs[0]} - {docs[-1]}")
-    return " | ".join(parts)
+            out[f"{key}_from"], out[f"{key}_to"] = docs[0], docs[-1]
+    return out
 
 
 def archive_run(run: dict) -> None:
@@ -1599,8 +1613,8 @@ def archive_run(run: dict) -> None:
         "vouchers": run.get("vouchers", ""),
         "journal_lines": run.get("total_lines", ""),
         "duplicates": run.get("duplicates", 0),
-        "doc_numbers": run.get("doc_range", ""),
         "folder": folder.name,
+        **run.get("doc_range", {}),
     }
     exists = HISTORY_FILE.exists()
     with HISTORY_FILE.open("a", newline="", encoding="utf-8") as handle:
@@ -2177,11 +2191,11 @@ HISTORY_HTML = """<!doctype html><html><head><meta charset="utf-8">
 """ + THEME_BOOT + """</head><body>
 <div class="shell">
 <aside class="side">
-  <div class="logo">
+  <a class="logo" href="{{ url_for('index') }}" style="text-decoration:none;color:inherit">
     <div class="mark">""" + BOOK_ICON + """</div>
     <div><div class="nm">""" + APP_NAME + """</div>
          <div class="co">""" + COMPANY + """</div></div>
-  </div>
+  </a>
   <div class="sblock c1">
     <div class="slabel">Converted so far</div>
     <div class="srow"><span class="k">Statements</span><span class="v big">{{ runs|length }}</span></div>
@@ -2203,30 +2217,158 @@ HISTORY_HTML = """<!doctype html><html><head><meta charset="utf-8">
     """ + TOPRIGHT.replace('<div class="topright">',
                            '<div class="topright">' + BACK_BTN) + """</div>
 
-  {% if not runs %}
-  <div class="panel"><p class="psub" style="margin:0">Nothing converted yet.
-    A statement appears here once you download its output.</p></div>
-  {% else %}
-  {% for r in runs %}
-  <div class="panel">
-    <div class="step"><span class="n">{{ loop.index }}</span>
-      <h2>{{ r.statement }}</h2></div>
-    <p class="psub">{{ r.converted_at }} &middot; {{ r.rows_read }} rows &rarr;
-      {{ r.vouchers }} vouchers, {{ r.journal_lines }} lines
-      {%- if r.duplicates and r.duplicates != '0' %} &middot;
-      {{ r.duplicates }} already imported{% endif %}
-      {%- if r.doc_numbers %}<br>{{ r.doc_numbers }}{% endif %}</p>
-    <div class="row" style="margin-top:0">
-      {% for f in r.files %}
-      <a href="{{ url_for('history_file', folder=r.folder, name=f) }}">
-        <button class="ghost">{{ f }}</button></a>
-      {% endfor %}
+  {% if error %}<div class="banner err"><span>&#9888;</span>
+  <div><strong>Couldn't do that.</strong> {{ error }}</div></div>{% endif %}
+  {% if notice %}<div class="banner ok"><span>&#10004;</span>
+  <div>{{ notice }}</div></div>{% endif %}
+
+  <div class="panel tabwrap">
+    <div class="tabs">
+      <button type="button" class="tab on" onclick="showTab(this,'h-runs')">Statements<span class="n">{{ runs|length }}</span></button>
+      <button type="button" class="tab" onclick="showTab(this,'h-refs')">Ref IDs on record<span class="n">{{ n_refs }}</span></button>
+    </div>
+
+    <div id="h-runs" class="pane on">
+      {% if not runs %}
+      <div class="scroll"><div class="empty">Nothing converted yet. A statement
+        appears here once you download its output.</div></div>
+      {% else %}
+      {{ runs_table|safe }}
+      <div class="addrow">
+        <div class="addhead">Files kept for each conversion</div>
+        {% for r in runs %}
+        <div class="row" style="margin-top:0;margin-bottom:9px;align-items:baseline">
+          <span class="hint" style="min-width:190px">{{ r.statement }}
+            <span style="opacity:.7">&middot; {{ r.converted_at }}</span></span>
+          {% for f in r.files %}
+          <a href="{{ url_for('history_file', folder=r.folder, name=f) }}">
+            <button class="ghost">{{ f.split(' - ')[-1] }}</button></a>
+          {% endfor %}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+
+    <div id="h-refs" class="pane">
+      {{ refs_table|safe }}
+
+      <form class="addrow" method="post" action="{{ url_for('import_refs_route') }}"
+            enctype="multipart/form-data">
+        <div class="addhead">Load Ref IDs you imported before this tool existed.
+          Upload a CSV with a <code>Ref ID</code> column &mdash; anything else in
+          the file is ignored. Those transactions will then be recognised as
+          already imported.</div>
+        <div class="addgrid">
+          <div><label for="refs-file">CSV file</label>
+            <input type="file" id="refs-file" name="refs" accept=".csv,.xlsx" required></div>
+          <div><label for="refs-note">Label these as</label>
+            <input type="text" id="refs-note" name="note" value="imported before this tool"></div>
+          <button type="submit" class="ghost">Load Ref IDs</button>
+        </div>
+        <div class="snote" style="color:var(--muted);margin-top:10px">
+          <a href="{{ url_for('refs_template') }}">Download a blank template</a>
+        </div>
+      </form>
     </div>
   </div>
-  {% endfor %}
-  {% endif %}
+
 </main></div>
-<script>""" + TAB_JS + """</script></body></html>"""
+
+<form id="ref-form" method="post" action="{{ url_for('edit_ref') }}" hidden>
+  <input type="hidden" name="old_ref" id="ref-old">
+  <input type="hidden" name="new_ref" id="ref-new">
+  <input type="hidden" name="confirm" id="ref-confirm">
+</form>
+
+<script>""" + TAB_JS + """
+// Changing a Ref ID rewrites posting history, so it asks twice: once for the
+// new value, once to confirm the swap in plain words.
+function editRef(btn){
+  var current = btn.dataset.ref || '';
+  var next = window.prompt(
+    'Change this Ref ID.
+
+Current: ' + current +
+    '
+
+This rewrites which transactions count as already imported.', current);
+  if (next === null) return;
+  next = next.trim();
+  if (!next || next === current) return;
+  if (!window.confirm(
+      'Confirm the change?
+
+  ' + current + '   →   ' + next +
+      '
+
+Transactions carrying ' + current +
+      ' will no longer be recognised as imported.')) return;
+  document.getElementById('ref-old').value = current;
+  document.getElementById('ref-new').value = next;
+  document.getElementById('ref-confirm').value = 'yes';
+  document.getElementById('ref-form').submit();
+}
+</script></body></html>"""
+
+
+@app.route("/refs/import", methods=["POST"])
+def import_refs_route():
+    """Load Ref IDs that were imported before this tool was in use."""
+    try:
+        upload = request.files.get("refs")
+        if not upload or not upload.filename:
+            return redirect(url_for("history", error="Choose a CSV of Ref IDs to load."))
+        workdir = Path(mkdtemp(prefix="vervi_refs_"))
+        path = save_upload(upload, workdir)
+        frame = (pd.read_csv(path, dtype=object, keep_default_na=False)
+                 if path.suffix.lower() == ".csv"
+                 else pd.read_excel(path, dtype=object))
+        # Accept whatever the column is called, as long as it means Ref ID.
+        col = next((c for c in frame.columns
+                    if str(c).strip().lower().replace(" ", "") in
+                    ("refid", "ref", "referenceid", "refno", "refnumber")), None)
+        if col is None:
+            return redirect(url_for("history", error=(
+                "That file has no 'Ref ID' column. Download the template to see "
+                "the shape expected.")))
+        added, known = import_posted_refs(
+            DEFAULT_POSTED_LEDGER, frame[col].tolist(),
+            note=clean_text(request.form.get("note", "")) or "loaded manually")
+    except Exception as exc:
+        return redirect(url_for("history", error=f"{type(exc).__name__}: {exc}"))
+    msg = f"Loaded {added} Ref ID{'' if added == 1 else 's'}"
+    if known:
+        msg += f"; {known} {'was' if known == 1 else 'were'} already on record"
+    return redirect(url_for("history", added=msg))
+
+
+@app.route("/refs/template")
+def refs_template():
+    """A blank CSV showing the one column that matters."""
+    rows = ["Ref ID,Note",
+            "938550170,example - only the Ref ID column is read",
+            "938550154,"]
+    body = "\n".join(rows) + "\n"
+    buf = io.BytesIO(body.encode("utf-8-sig"))
+    return send_file(buf, as_attachment=True, mimetype="text/csv",
+                     download_name="ref-ids-template.csv")
+
+
+@app.route("/refs/edit", methods=["POST"])
+def edit_ref():
+    """Correct one Ref ID. The page asks twice before this is reached."""
+    old_ref = request.form.get("old_ref", "")
+    try:
+        if request.form.get("confirm") != "yes":
+            raise ValueError("The change was not confirmed")
+        update_posted_ref(DEFAULT_POSTED_LEDGER, old_ref,
+                          request.form.get("new_ref", ""))
+    except Exception as exc:
+        return redirect(url_for("history", error=str(exc)))
+    return redirect(url_for("history",
+                            added=f"Ref ID {clean_text(old_ref)} changed to "
+                                  f"{clean_text(request.form.get('new_ref', ''))}"))
 
 
 @app.route("/history")
@@ -2238,8 +2380,45 @@ def history():
             refs = max(0, sum(1 for _ in DEFAULT_POSTED_LEDGER.open(encoding="utf-8")) - 1)
         except OSError:
             refs = 0
-    return render_template_string(HISTORY_HTML, css=BASE_CSS,
-                                  runs=read_history(), n_refs=refs)
+    runs = read_history()
+    runs_frame = pd.DataFrame([{
+        "#": i,
+        "Statement": r.get("statement", ""),
+        "Converted at": r.get("converted_at", ""),
+        "Rows": r.get("rows_read", ""),
+        "Vouchers": r.get("vouchers", ""),
+        "Lines": r.get("journal_lines", ""),
+        "Duplicates": r.get("duplicates", ""),
+        "Sales from": r.get("sales_from", ""),
+        "Sales to": r.get("sales_to", ""),
+        "JE from": r.get("je_from", ""),
+        "JE to": r.get("je_to", ""),
+    } for i, r in enumerate(runs, start=1)])
+
+    ref_rows = read_posted_refs(DEFAULT_POSTED_LEDGER)
+    refs_frame = pd.DataFrame([{
+        "Ref ID": r.get("ref_id", ""),
+        "Date": r.get("date", ""),
+        "Type": r.get("transaction_type", ""),
+        "Posted as": r.get("document_number", ""),
+        "From": r.get("source", ""),
+        "Recorded": r.get("posted_at", ""),
+    } for r in ref_rows])
+
+    def ref_action(row):
+        ref = escape(str(row["Ref ID"]), quote=True)
+        return (f'<button type="button" class="editbtn" onclick="editRef(this)" '
+                f'data-ref="{ref}">Edit</button>')
+
+    return render_template_string(
+        HISTORY_HTML, css=BASE_CSS, runs=runs, n_refs=len(ref_rows),
+        error=request.args.get("error"), notice=request.args.get("added"),
+        runs_table=html_table(runs_frame, "Nothing converted yet."),
+        refs_table=html_table(
+            refs_frame,
+            "No Ref IDs on record yet — they are added when you download a "
+            "conversion, or you can load older ones below.",
+            actions=ref_action))
 
 
 @app.route("/history/<folder>/<name>")
