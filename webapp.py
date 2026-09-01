@@ -28,6 +28,7 @@ import csv
 import io
 import itertools
 import os
+import re
 import zipfile
 import secrets
 import shutil
@@ -2233,11 +2234,6 @@ HISTORY_HTML = """<!doctype html><html><head><meta charset="utf-8">
       <div class="scroll"><div class="empty">Nothing converted yet. A statement
         appears here once you download its output.</div></div>
       {% else %}
-      {{ runs_table|safe }}
-      <div class="addrow">
-        <div class="addhead">Every file each conversion produced &mdash; the JE and
-          Sales halves are kept apart so each series can be tracked on its own.</div>
-      </div>
       {{ files_table|safe }}
       {% endif %}
     </div>
@@ -2249,6 +2245,12 @@ HISTORY_HTML = """<!doctype html><html><head><meta charset="utf-8">
 
 </main></div>
 
+<form id="file-form" method="post" action="{{ url_for('rename_file') }}" hidden>
+  <input type="hidden" name="folder" id="file-folder">
+  <input type="hidden" name="old_name" id="file-old">
+  <input type="hidden" name="new_name" id="file-new">
+</form>
+
 <form id="ref-form" method="post" action="{{ url_for('edit_ref') }}" hidden>
   <input type="hidden" name="old_ref" id="ref-old">
   <input type="hidden" name="new_ref" id="ref-new">
@@ -2258,6 +2260,24 @@ HISTORY_HTML = """<!doctype html><html><head><meta charset="utf-8">
 <script>""" + TAB_JS + """
 // Changing a Ref ID rewrites posting history, so it asks twice: once for the
 // new value, once to confirm the swap in plain words.
+// Renaming only touches the archived copy -- the numbers inside are untouched,
+// so this asks once, unlike a Ref ID change.
+function renameFile(btn){
+  var current = btn.dataset.name || '';
+  var dot = current.lastIndexOf('.');
+  var stem = dot > 0 ? current.slice(0, dot) : current;
+  var ext  = dot > 0 ? current.slice(dot) : '';
+  var next = window.prompt('Name for this file' + nlc() + '(' + (ext || 'no extension') + ' is kept)', stem);
+  if (next === null) return;
+  next = next.trim();
+  if (!next || next + ext === current) return;
+  document.getElementById('file-folder').value = btn.dataset.folder || '';
+  document.getElementById('file-old').value = current;
+  document.getElementById('file-new').value = next + ext;
+  document.getElementById('file-form').submit();
+}
+function nlc(){ return String.fromCharCode(10) + String.fromCharCode(10); }
+
 function editRef(btn){
   var current = btn.dataset.ref || '';
   var nl = String.fromCharCode(10);
@@ -2300,26 +2320,27 @@ def edit_ref():
 @app.route("/history")
 def history():
     """Statements already converted, with their output files."""
-    refs = 0
-    if DEFAULT_POSTED_LEDGER.exists():
-        try:
-            refs = max(0, sum(1 for _ in DEFAULT_POSTED_LEDGER.open(encoding="utf-8")) - 1)
-        except OSError:
-            refs = 0
     runs = read_history()
-    runs_frame = pd.DataFrame([{
-        "#": i,
-        "Statement": r.get("statement", ""),
-        "Converted at": r.get("converted_at", ""),
-        "Rows": r.get("rows_read", ""),
-        "Vouchers": r.get("vouchers", ""),
-        "Lines": r.get("journal_lines", ""),
-        "Duplicates": r.get("duplicates", ""),
-        "Sales from": r.get("sales_from", ""),
-        "Sales to": r.get("sales_to", ""),
-        "JE from": r.get("je_from", ""),
-        "JE to": r.get("je_to", ""),
-    } for i, r in enumerate(runs, start=1)])
+
+    def numbers_used(run: dict, part: str) -> str:
+        """The document numbers this particular file covers.
+
+        A summary table above the files only repeated the statement name and
+        date already on every row. The one thing it carried that the file list
+        did not is the range of numbers issued -- so it rides along here, on the
+        row it actually describes.
+        """
+        spans = []
+        if part in ("Import", "Sales"):
+            spans.append((run.get("sales_from", ""), run.get("sales_to", "")))
+        if part in ("Import", "JE"):
+            spans.append((run.get("je_from", ""), run.get("je_to", "")))
+        out = []
+        for first, last in spans:
+            if not first:
+                continue
+            out.append(first if first == last else f"{first} to {last}")
+        return "  ".join(out)
 
     # One row per file, so the JE and Sales halves of a statement are visible
     # as separate lines rather than a row of buttons.
@@ -2328,11 +2349,13 @@ def history():
         for f in r.get("files", []):
             part = f.rsplit(" - ", 1)[-1]
             name, _, ext = part.rpartition(".")
+            part_name = name or part
             file_rows.append({
                 "Statement": r.get("statement", ""),
                 "Converted at": r.get("converted_at", ""),
-                "Part": name or part,
+                "Part": part_name,
                 "Format": ext.upper(),
+                "Numbers used": numbers_used(r, part_name),
                 "File": f,
                 "_folder": r.get("folder", ""),
             })
@@ -2340,7 +2363,11 @@ def history():
 
     def file_action(row):
         href = url_for("history_file", folder=row["_folder"], name=row["File"])
-        return (f'<a href="{escape(href, quote=True)}">'
+        name = escape(str(row["File"]), quote=True)
+        folder = escape(str(row["_folder"]), quote=True)
+        return (f'<button type="button" class="editbtn" onclick="renameFile(this)" '
+                f'data-name="{name}" data-folder="{folder}">Rename</button> '
+                f'<a href="{escape(href, quote=True)}">'
                 f'<button type="button" class="editbtn">Download</button></a>')
 
     ref_rows = read_posted_refs(DEFAULT_POSTED_LEDGER)
@@ -2357,7 +2384,6 @@ def history():
     return render_template_string(
         HISTORY_HTML, css=BASE_CSS, runs=runs, n_refs=len(ref_rows),
         error=request.args.get("error"), notice=request.args.get("added"),
-        runs_table=html_table(runs_frame, "Nothing converted yet."),
         files_table=html_table(files_frame, "No files yet.",
                                actions=file_action if file_rows else None,
                                hidden=("_folder",)),
@@ -2366,6 +2392,49 @@ def history():
             "No Ref IDs on record yet — they are added when you download a "
             "conversion.",
             actions=ref_action))
+
+
+def safe_output_name(name: str) -> str:
+    """A file name that is the user's, minus anything that escapes the folder.
+
+    secure_filename would do the job but it also replaces spaces with
+    underscores, and every archived name here reads "Statement - Sales.csv".
+    Keep spaces; drop path separators, control characters and the Windows
+    reserved punctuation instead.
+    """
+    name = "".join(ch for ch in name.strip() if ch.isprintable())
+    name = re.sub(r'[\/:*?"<>|]', "", name).strip(" .")
+    return "" if name in ("", ".", "..") else name[:120]
+
+
+@app.route("/history/rename", methods=["POST"])
+def rename_file():
+    """Rename one archived output file, in place.
+
+    Only the file on disk changes -- the history row points at a folder, and the
+    table reads whatever files that folder holds, so nothing else needs updating.
+    """
+    base = EXPORTS_DIR.resolve()
+    folder = (base / (request.form.get("folder") or "")).resolve()
+    old_name = (request.form.get("old_name") or "").strip()
+    new_name = safe_output_name(request.form.get("new_name") or "")
+
+    source = (folder / old_name).resolve()
+    target = (folder / new_name).resolve()
+    # Every path must land inside the exports folder, whatever was posted.
+    inside = (str(folder).startswith(str(base))
+              and str(source).startswith(str(base))
+              and str(target).startswith(str(base)))
+    if not inside or not new_name or not source.is_file():
+        return redirect(url_for("history", error="That file could not be renamed."))
+    if target.exists() and target != source:
+        return redirect(url_for("history",
+                                error=f"A file named {new_name} is already there."))
+    try:
+        source.rename(target)
+    except OSError as exc:
+        return redirect(url_for("history", error=f"Could not rename: {exc}"))
+    return redirect(url_for("history", added=f"Renamed to {new_name}."))
 
 
 @app.route("/history/<folder>/<name>")
