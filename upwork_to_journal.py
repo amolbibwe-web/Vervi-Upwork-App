@@ -99,6 +99,7 @@ DEFAULT_POSTED_LEDGER = Path(__file__).parent / "master" / "posted_refs.csv"
 #: the repo, so a hosted instance with an empty disk still starts at the right
 #: number rather than at 001.
 DOC_REGISTRY_SEED_NAME = "doc_registry_seed.csv"
+POSTED_LEDGER_SEED_NAME = "posted_refs_seed.csv"
 
 #: Cell token in Sheet2 meaning "substitute the wallet ledger from Table B".
 GL_PLACEHOLDER = "gl name"
@@ -894,6 +895,31 @@ POSTED_COLUMNS = ("ref_id", "transaction_id", "date", "transaction_type",
                   "amount_usd", "document_number", "source", "posted_at")
 
 
+def _read_ref_rows(path: Path) -> list[dict]:
+    """Rows of one Ref ID file, in file order. Missing file means no rows."""
+    if not path or not path.exists():
+        return []
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _ref_rows_with_seed(path: Path) -> list[dict]:
+    """Live ledger rows plus any seed rows the live file does not already have.
+
+    The seed sits beside the ledger and is committed to the repo. The ledger
+    itself is not: it holds live business data, and on a hosted instance the
+    disk is wiped on every restart. Without the seed that instance would come
+    back with an empty ledger and treat every previously-journalised
+    transaction as new. A live row always wins over a seed row for the same
+    Ref ID, so an edit made in the app is not undone by the seed.
+    """
+    live = _read_ref_rows(path)
+    known = {norm_key(r.get("ref_id", "")) for r in live}
+    seed = [r for r in _read_ref_rows(path.with_name(POSTED_LEDGER_SEED_NAME))
+            if norm_key(r.get("ref_id", "")) and norm_key(r.get("ref_id", "")) not in known]
+    return seed + live
+
+
 class PostedLedger:
     """Remembers which Upwork transactions have already been journalised.
 
@@ -916,14 +942,11 @@ class PostedLedger:
             self._load()
 
     def _load(self) -> None:
-        if not self.path.exists():
-            return
         try:
-            with self.path.open(newline="", encoding="utf-8") as handle:
-                for row in csv.DictReader(handle):
-                    key = norm_key(row.get("ref_id", ""))
-                    if key:
-                        self.seen.setdefault(key, row)
+            for row in _ref_rows_with_seed(self.path):
+                key = norm_key(row.get("ref_id", ""))
+                if key:
+                    self.seen.setdefault(key, row)
         except OSError:
             # Refuse to run blind: silently treating the ledger as empty would
             # re-post everything it was meant to protect.
@@ -977,12 +1000,9 @@ class PostedLedger:
 
 
 def read_posted_refs(path: Path) -> list[dict]:
-    """Every Ref ID on record, newest first."""
-    if not path.exists():
-        return []
+    """Every Ref ID on record, newest first -- seed included."""
     try:
-        with path.open(newline="", encoding="utf-8") as handle:
-            rows = list(csv.DictReader(handle))
+        rows = _ref_rows_with_seed(path)
     except OSError:
         return []
     rows.reverse()

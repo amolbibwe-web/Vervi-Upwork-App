@@ -1,0 +1,38 @@
+# --- live business data: never commit ------------------------------------
+# The repo is public so GitHub Pages can serve the interface for free. Real
+# client names, freelancer names, earnings and ledger codes stay local.
+data/
+master/mapping_master.csv
+master/doc_registry.csv
+master/posted_refs.csv
+# (master/doc_registry_seed.csv IS committed - it sets the opening numbers)
+# (master/posted_refs_seed.csv IS committed - bare Ref IDs, no names or amounts,
+#  so a hosted instance still recognises what was already journalised)
+fx_cache.csv
+out/
+exports/
+publish/
+
+# --- runtime artefacts from autostart.ps1 --------------------------------
+logs/
+current_url.txt
+
+# docs/ is the canonical copy of the preview; these are local working copies.
+preview/
+Vervi Upwork.html
+
+# The demo inputs and the anonymised page ARE committed -- see demo/ and docs/.
+
+# --- python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# --- editors / os ---------------------------------------------------------
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+~$*
