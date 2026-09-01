@@ -48,6 +48,7 @@ from upwork_to_journal import (DEFAULT_DOC_REGISTRY, DEFAULT_DOC_SERIES,
                                VOUCHER_JE, VOUCHER_SALES, DocumentNumberer,
                                Reporter, add_treatment, add_wallet,
                                build_import_frame, build_journal,
+                               PostedLedger, DEFAULT_POSTED_LEDGER,
                                build_reconciliation, clean_text, delete_treatment,
                                delete_wallet, load_mapping, load_statement,
                                to_decimal, update_treatment, update_wallet,
@@ -1059,6 +1060,8 @@ FORM_HTML = """<!doctype html><html><head><meta charset="utf-8">
           Offline &mdash; use cached rates only</label>
         <label class="switch"><input type="checkbox" name="reset_docs" {{ 'checked' if reset_docs }}>
           Restart document numbering at 001</label>
+        <label class="switch"><input type="checkbox" name="ignore_posted" {{ 'checked' if ignore_posted }}>
+          Import everything, even rows posted before (ignores Ref ID history)</label>
       </details>
     </div>
   </form>
@@ -1288,6 +1291,8 @@ RESULT_SIDE = """
     <div class="srow"><span class="k">Rows read</span><span class="v">{{ rows_read }}</span></div>
     <div class="srow"><span class="k">Vouchers</span><span class="v">{{ vouchers }}</span></div>
     <div class="srow"><span class="k">Journal lines</span><span class="v">{{ total_lines }}</span></div>
+    {% if duplicates %}<div class="srow"><span class="k">Already imported</span>
+      <span class="v">{{ duplicates }} skipped</span></div>{% endif %}
   </div>
   <div class="sblock c3">
     <div class="slabel">Totals ({{ currency }})</div>
@@ -1347,6 +1352,11 @@ RESULT_HTML = """<!doctype html><html><head><meta charset="utf-8">
   {% if errors %}<div class="banner err"><span>&#9940;</span>
   <div><strong>{{ errors }} error{{ '' if errors == 1 else 's' }}.</strong>
   Those rows were not posted &mdash; see Exceptions.</div></div>{% endif %}
+
+  {% if duplicates %}<div class="banner warn"><span>&#128260;</span>
+  <div><strong>{{ duplicates }} row{{ '' if duplicates == 1 else 's' }} already imported.</strong>
+  Matched on Ref ID against earlier runs and skipped, so nothing is posted twice.
+  See the Skipped tab for which ones and when they went in.</div></div>{% endif %}
 
   {% if fx_warnings %}<div class="banner warn"><span>&#128197;</span>
   <div><strong>Exchange-rate fallback.</strong>
@@ -1684,6 +1694,7 @@ def render_form(message: str | None = None, form=None, notice: str | None = None
         fx_source=form.get("fx_source", "rbi"),
         fx_offline=bool(form.get("fx_offline")),
         reset_docs=bool(form.get("reset_docs")),
+        ignore_posted=bool(form.get("ignore_posted")),
         income_mode=form.get("income_mode", "two-entry"),
         entity=form.get("entity", COMPANY),
         ie_flag=form.get("ie_flag", "I"),
@@ -1864,10 +1875,16 @@ def run():
                                f"Table B maps '{mapping.wallet_display.get(key, key)}' to "
                                f"conflicting GLs: {', '.join(candidates)}")
 
+        # Ref IDs already journalised, so an overlapping or re-uploaded
+        # statement is not posted twice.
+        posted = PostedLedger(DEFAULT_POSTED_LEDGER,
+                              source=statement_path.name,
+                              enabled=not form.get("ignore_posted"))
+
         journal = build_journal(statement, mapping, igst_rate=igst_rate,
                                 currency=currency, fx_provider=fx_provider,
                                 income_mode=income_mode, reporter=reporter,
-                                numberer=numberer)
+                                numberer=numberer, entity=entity, posted=posted)
 
         for warning in fx_provider.warnings:
             reporter.exception("-", "FX_FALLBACK", warning, severity="INFO")
@@ -1894,7 +1911,7 @@ def run():
     # Name the downloads after the statement they came from, so a folder of
     # exports says which is which instead of a pile of journal.csv files.
     RUNS[run_id] = {"xlsx": out_xlsx, "csv": out_csv,
-                    "numberer": numberer, "committed": False,
+                    "numberer": numberer, "posted": posted, "committed": False,
                     "stem": Path(statement_path).stem,
                     "import_frame": import_frame}
 
@@ -1925,6 +1942,8 @@ def run():
         difference=fmt_money(difference), balanced=abs(difference) < 0.005,
         rcm_total=fmt_money(rcm_in), rcm_net=fmt_money(rcm_in - rcm_out) if rcm_in else None,
         errors=len(reporter.errors),
+        duplicates=sum(1 for s in reporter.skipped
+                       if str(s.get("Reason", "")).startswith("Already imported")),
         n_fx=len(fx_audit), n_exc=len(exceptions), n_skip=len(skipped),
         import_table=html_table(import_frame, "Nothing to import.",
                                 numeric=("Amount", "Debit", "Credit",
@@ -2021,6 +2040,7 @@ def download(run_id: str, kind: str):
     if not run["committed"]:
         try:
             run["numberer"].save()
+            run["posted"].save()
             run["committed"] = True
         except Exception:
             # A registry that cannot be written must not block the download; the

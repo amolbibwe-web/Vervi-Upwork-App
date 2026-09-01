@@ -90,6 +90,11 @@ DEFAULT_MASTER_MAPPING = Path(__file__).parent / "master" / "mapping_master.csv"
 #: client, a new month -- continues the series instead of restarting it.
 DEFAULT_DOC_REGISTRY = Path(__file__).parent / "master" / "doc_registry.csv"
 
+#: Every Ref ID already posted to the books. Upwork's Ref ID is unique per
+#: transaction, so it is the key that tells a genuinely new row from one that
+#: arrived again in an overlapping statement.
+DEFAULT_POSTED_LEDGER = Path(__file__).parent / "master" / "posted_refs.csv"
+
 #: Opening positions, used when no registry exists yet. This one IS committed to
 #: the repo, so a hosted instance with an empty disk still starts at the right
 #: number rather than at 001.
@@ -880,6 +885,93 @@ REGISTRY_COLUMNS = ("document_number", "type", "date", "prefix", "seq",
                     "issued_at", "source")
 
 
+#: Columns of the posted-transactions ledger.
+POSTED_COLUMNS = ("ref_id", "transaction_id", "date", "transaction_type",
+                  "amount_usd", "document_number", "source", "posted_at")
+
+
+class PostedLedger:
+    """Remembers which Upwork transactions have already been journalised.
+
+    Statements are pulled every fortnight and overlap, and an old file gets
+    re-uploaded by accident. Ref ID is unique per Upwork transaction, so keeping
+    the ones already posted lets a re-run skip them instead of double-booking.
+
+    Like document numbers, entries are held back until the export is actually
+    downloaded -- previewing a statement must not mark it as posted.
+    """
+
+    def __init__(self, path: Path | None = None, *, source: str = "",
+                 enabled: bool = True) -> None:
+        self.path = path
+        self.source = source
+        self.enabled = enabled and path is not None
+        self.seen: dict[str, dict[str, str]] = {}
+        self._pending: list[dict[str, Any]] = []
+        if self.enabled:
+            self._load()
+
+    def _load(self) -> None:
+        if not self.path.exists():
+            return
+        try:
+            with self.path.open(newline="", encoding="utf-8") as handle:
+                for row in csv.DictReader(handle):
+                    key = norm_key(row.get("ref_id", ""))
+                    if key:
+                        self.seen.setdefault(key, row)
+        except OSError:
+            # Refuse to run blind: silently treating the ledger as empty would
+            # re-post everything it was meant to protect.
+            raise ValueError(
+                f"Posted-transaction ledger {self.path} exists but could not be "
+                f"read; refusing to run rather than risk double-posting")
+
+    def already_posted(self, ref: str) -> dict[str, str] | None:
+        """The earlier posting for this Ref ID, or None if it is new."""
+        if not self.enabled:
+            return None
+        return self.seen.get(norm_key(ref))
+
+    def record(self, ref: str, row: dict[str, Any], doc_no: str,
+               txn_type: str, amount_usd: Any) -> None:
+        """Note a Ref ID as posted -- pending until `save` is called."""
+        if not self.enabled or not clean_text(ref):
+            return
+        entry = {
+            "ref_id": clean_text(ref),
+            "transaction_id": clean_text(row.get("transaction_id")),
+            "date": clean_text(row.get("date")),
+            "transaction_type": txn_type,
+            "amount_usd": f"{amount_usd}",
+            "document_number": doc_no,
+            "source": self.source,
+            "posted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self._pending.append(entry)
+        # Guards against the same Ref ID appearing twice inside one statement.
+        self.seen.setdefault(norm_key(ref), entry)
+
+    @property
+    def pending(self) -> list[dict[str, Any]]:
+        return list(self._pending)
+
+    def save(self) -> int:
+        """Append this run's Ref IDs to the ledger. Returns how many."""
+        if not self.enabled or not self._pending:
+            return 0
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        exists = self.path.exists()
+        with self.path.open("a", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=POSTED_COLUMNS)
+            if not exists:
+                writer.writeheader()
+            writer.writerows(self._pending)
+        count = len(self._pending)
+        self._pending.clear()
+        return count
+
+
 class DocumentNumberer:
     """Issues document numbers like 26-27/LLP/Jul/001 and 26-27/V/RE-U/001.
 
@@ -1048,7 +1140,8 @@ def build_journal(statement: pd.DataFrame, mapping: Mapping, *,
                   income_mode: str, reporter: Reporter,
                   doc_series: dict[str, str] | None = None,
                   numberer: "DocumentNumberer | None" = None,
-                  entity: str = "") -> pd.DataFrame:
+                  entity: str = "",
+                  posted: "PostedLedger | None" = None) -> pd.DataFrame:
     """Walk the statement and emit journal lines.
 
     `fx_provider` resolves one rate per transaction date (see rbi_fx.py); it is
@@ -1096,6 +1189,21 @@ def build_journal(statement: pd.DataFrame, mapping: Mapping, *,
                           **{"Transaction Type": txn_type,
                              "Amount USD": clean_text(row.get("amount_usd"))})
             continue
+
+        # Statements overlap by design, and an old one gets re-uploaded by
+        # accident. Ref ID identifies the Upwork transaction, so anything
+        # already journalised is skipped rather than posted twice.
+        ref_id = clean_text(row.get("ref_id")) or clean_text(row.get("transaction_id"))
+        if posted is not None:
+            earlier = posted.already_posted(ref_id)
+            if earlier:
+                reporter.skip(
+                    row_no,
+                    f"Already imported on {earlier.get('posted_at', '?')[:10]} "
+                    f"as {earlier.get('document_number', '?')}",
+                    **{"Transaction Type": txn_type, "Ref ID": ref_id,
+                       "Amount USD": clean_text(row.get("amount_usd"))})
+                continue
 
         amount_usd = to_decimal(row.get("amount_usd"))
         if amount_usd is None:
@@ -1170,8 +1278,11 @@ def build_journal(statement: pd.DataFrame, mapping: Mapping, *,
         # -- so a shared statement can still post to more than one entity.
         subsidiary = mapping.subsidiaries.get(account_key) or entity
 
+        first_doc = ""
         for voucher in build_legs(treatment, ctx, income_mode):
             doc_no = numberer.next(voucher.kind, date.date())
+            if not first_doc:
+                first_doc = doc_no
 
             debits = sum((leg.amount for leg in voucher.legs if leg.side == "Dr"),
                          Decimal("0"))
@@ -1209,6 +1320,9 @@ def build_journal(statement: pd.DataFrame, mapping: Mapping, *,
                     "Rate Source": rate_source,
                     "Narration": text,
                 })
+
+        if posted is not None:
+            posted.record(ref_id, row, first_doc, treatment.nature, abs(amount_usd))
 
     return pd.DataFrame(lines, columns=JOURNAL_COLUMNS)
 
@@ -1416,6 +1530,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "resume from it so numbers are never reused")
     parser.add_argument("--reset-doc-numbers", action="store_true",
                         help="Ignore the registry and start each series at 001 again")
+    parser.add_argument("--posted-ledger", type=Path, default=DEFAULT_POSTED_LEDGER,
+                        help="Record of Ref IDs already journalised; matching rows "
+                             "in a later statement are skipped as duplicates")
+    parser.add_argument("--ignore-posted", action="store_true",
+                        help="Post every row even if its Ref ID was imported before")
     parser.add_argument("--income-mode", choices=("two-entry", "combined"), default="two-entry",
                         help="two-entry: Sales voucher (Dr Client/Cr Revenue) then a JE "
                              "(Dr Wallet/Cr Client). combined: one Dr Wallet/Cr Revenue")
@@ -1552,11 +1671,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    try:
+        posted = PostedLedger(args.posted_ledger, source=statement_path.name,
+                              enabled=not args.ignore_posted)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     journal = build_journal(
         statement, mapping,
         igst_rate=igst_rate, currency=args.currency, fx_provider=fx_provider,
         income_mode=args.income_mode, reporter=reporter, numberer=numberer,
-        entity=args.entity)
+        entity=args.entity, posted=posted)
 
     # Every stale-rate decision goes on the record as an INFO note, so the
     # accountant sees which dates were priced off an older day's rate.
@@ -1574,8 +1700,9 @@ def main(argv: list[str] | None = None) -> int:
     csv_path = write_outputs(args.out, journal, reconciliation, exceptions, skipped,
                              fx_audit=fx_audit, import_frame=import_frame)
 
-    # Only commit the numbers once the output is safely written.
+    # Only commit the numbers -- and the Ref IDs -- once the output is written.
     recorded = numberer.save()
+    posted_now = posted.save()
 
     # --- summarise to the console -------------------------------------------
     total_debit = round(journal["Debit"].sum(), 2) if not journal.empty else 0.0
@@ -1592,7 +1719,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Total debits   : {total_debit:,.2f} {args.currency}")
     print(f"Total credits  : {total_credit:,.2f} {args.currency}")
     print(f"Difference     : {total_debit - total_credit:,.2f}")
-    print(f"Skipped rows   : {len(skipped)}")
+    duplicates = sum(1 for s in reporter.skipped
+                     if str(s.get("Reason", "")).startswith("Already imported"))
+    print(f"Skipped rows   : {len(skipped)}"
+          + (f"  ({duplicates} already imported)" if duplicates else ""))
+    if posted_now:
+        print(f"Ref IDs logged : {posted_now} in {args.posted_ledger.name}")
     if not fx_audit.empty:
         sources = fx_audit["Source"].value_counts().to_dict()
         print(f"FX dates       : {len(fx_audit)} "

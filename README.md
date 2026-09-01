@@ -293,6 +293,26 @@ has its own counter, keyed on the rendered prefix — which is why the JE series
 monthly and Sales doesn't, without either being special-cased. Override with
 `--doc-series-je` / `--doc-series-sales`; `{mm}` and `{yyyy}` are also available.
 
+### Already-imported detection
+
+Statements are pulled every fortnight and overlap, and sooner or later an old
+one gets re-uploaded. Upwork's **Ref ID** is unique per transaction, so every Ref
+ID that has been exported is recorded in `master/posted_refs.csv`; a later
+statement containing it is skipped rather than posted twice.
+
+```
+Rows read      : 11
+Vouchers       : 4
+Skipped rows   : 8  (8 already imported)
+Ref IDs logged : 3
+```
+
+The Skipped sheet names each one and when it went in — *"Already imported on
+2026-09-01 as 26-27/LLP/Jul/001"*. Like document numbers, Ref IDs are only
+recorded when the export is **downloaded**, so previewing a statement never
+marks it as posted. `--ignore-posted` (or the toggle in the UI) forces
+everything through.
+
 **Numbers are never reused.** Every number issued is recorded in
 `master/doc_registry.csv` (`document_number, type, date, prefix, seq, issued_at, source`)
 and each series resumes from the highest number already there. Convert a second statement
