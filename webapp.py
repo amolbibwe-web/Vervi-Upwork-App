@@ -24,11 +24,13 @@ Bound to 127.0.0.1 only -- this is a local convenience UI, not a hosted service.
 from __future__ import annotations
 
 import argparse
+import csv
 import io
 import itertools
 import os
 import zipfile
 import secrets
+import shutil
 import time
 import uuid
 from datetime import datetime
@@ -95,6 +97,13 @@ SAMPLE_STATEMENT = HERE / "data" / "Sheet1.csv"
 #: Table B (Account Name -> GL Name) both live here, and are edited in this one
 #: file when a freelancer joins.
 MASTER_MAPPING = HERE / "master" / "mapping_master.csv"
+
+#: Completed conversions: the outputs are kept here so a statement converted
+#: last fortnight can be found and downloaded again without re-running it.
+EXPORTS_DIR = HERE / "exports"
+HISTORY_FILE = EXPORTS_DIR / "history.csv"
+HISTORY_COLUMNS = ("converted_at", "statement", "rows_read", "vouchers",
+                   "journal_lines", "duplicates", "doc_numbers", "folder")
 
 #: run id -> {"xlsx": Path, "csv": Path}, so downloads survive the redirect.
 RUNS: dict[str, dict[str, Path]] = {}
@@ -893,6 +902,15 @@ SIDEBAR = """<aside class="side">
          <div class="co">""" + COMPANY + """</div></div>
   </div>
   {% block sidebody %}{% endblock %}
+  <div class="sblock c2">
+    <div class="slabel">History</div>
+    <div class="srow"><span class="k">Statements converted</span>
+      <span class="v big">{{ n_history }}</span></div>
+    <div class="row" style="margin-top:8px">
+      <a href="{{ url_for('history') }}" style="width:100%">
+        <button type="button" class="sidealt" style="width:100%">See converted files</button></a>
+    </div>
+  </div>
   <div class="sblock c4">
     <div class="slabel">How to import</div>
     <ol class="steps-list">
@@ -1364,7 +1382,8 @@ RESULT_HTML = """<!doctype html><html><head><meta charset="utf-8">
   {% if duplicates %}<div class="banner warn"><span>&#128260;</span>
   <div><strong>{{ duplicates }} row{{ '' if duplicates == 1 else 's' }} already imported.</strong>
   Matched on Ref ID against earlier runs and skipped, so nothing is posted twice.
-  See the Skipped tab for which ones and when they went in.</div></div>{% endif %}
+  See the <strong>Already imported</strong> tab for the Ref IDs and when they
+  went in.</div></div>{% endif %}
 
   {% if fx_warnings %}<div class="banner warn"><span>&#128197;</span>
   <div><strong>Exchange-rate fallback.</strong>
@@ -1377,6 +1396,7 @@ RESULT_HTML = """<!doctype html><html><head><meta charset="utf-8">
       <button type="button" class="tab" onclick="showTab(this,'p-rec')">Reconciliation</button>
       <button type="button" class="tab" onclick="showTab(this,'p-fx')">FX audit<span class="n">{{ n_fx }}</span></button>
       <button type="button" class="tab" onclick="showTab(this,'p-exc')">Exceptions<span class="n">{{ n_exc }}</span></button>
+      <button type="button" class="tab" onclick="showTab(this,'p-dup')">Already imported<span class="n">{{ n_dup }}</span></button>
       <button type="button" class="tab" onclick="showTab(this,'p-skp')">Skipped<span class="n">{{ n_skip }}</span></button>
     </div>
     <div id="p-imp" class="pane on">{{ import_table|safe }}</div>
@@ -1384,6 +1404,7 @@ RESULT_HTML = """<!doctype html><html><head><meta charset="utf-8">
     <div id="p-rec" class="pane">{{ recon_table|safe }}</div>
     <div id="p-fx"  class="pane">{{ fx_audit_table|safe }}</div>
     <div id="p-exc" class="pane">{{ exceptions_table|safe }}</div>
+    <div id="p-dup" class="pane">{{ duplicates_table|safe }}</div>
     <div id="p-skp" class="pane">{{ skipped_table|safe }}</div>
   </div>
 </main></div><script>""" + TAB_JS + """</script></body></html>"""
@@ -1531,6 +1552,74 @@ def save_upload(file_storage, folder: Path) -> Path | None:
     target = folder / name
     file_storage.save(target)
     return target
+
+
+def doc_range(journal: pd.DataFrame) -> str:
+    """A one-line summary of the numbers a run used, for the history."""
+    if journal.empty:
+        return ""
+    parts = []
+    for kind in (VOUCHER_SALES, VOUCHER_JE):
+        docs = sorted(journal[journal["Voucher Type"] == kind]["Document Number"].unique())
+        if docs:
+            parts.append(docs[0] if len(docs) == 1 else f"{docs[0]} - {docs[-1]}")
+    return " | ".join(parts)
+
+
+def archive_run(run: dict) -> None:
+    """Keep a downloaded run's outputs, and note it in the history.
+
+    Only downloaded runs are kept -- the same rule the document numbers follow,
+    so the history is a record of what was actually taken, not what was looked at.
+    """
+    stamp = datetime.now()
+    stem = secure_filename(run.get("stem") or "statement").rstrip("_") or "statement"
+    folder = EXPORTS_DIR / f"{stamp:%Y%m%d-%H%M%S} {stem}"
+    folder.mkdir(parents=True, exist_ok=True)
+
+    for kind in ("csv", "xlsx"):
+        src = run.get(kind)
+        if src and src.exists():
+            shutil.copy2(src, folder / f"{stem} - import.{kind}")
+    frame = run.get("import_frame")
+    if frame is not None and not frame.empty:
+        for kind in (VOUCHER_JE, VOUCHER_SALES):
+            part = frame[frame["Type"] == kind]
+            part.to_csv(folder / f"{stem} - {kind}.csv", index=False,
+                        encoding="utf-8-sig")
+
+    row = {
+        "converted_at": stamp.strftime("%Y-%m-%d %H:%M:%S"),
+        "statement": run.get("stem", ""),
+        "rows_read": run.get("rows_read", ""),
+        "vouchers": run.get("vouchers", ""),
+        "journal_lines": run.get("total_lines", ""),
+        "duplicates": run.get("duplicates", 0),
+        "doc_numbers": run.get("doc_range", ""),
+        "folder": folder.name,
+    }
+    exists = HISTORY_FILE.exists()
+    with HISTORY_FILE.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=HISTORY_COLUMNS)
+        if not exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def read_history() -> list[dict]:
+    """Past conversions, newest first."""
+    if not HISTORY_FILE.exists():
+        return []
+    try:
+        with HISTORY_FILE.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+    except OSError:
+        return []
+    rows.reverse()
+    for r in rows:
+        folder = EXPORTS_DIR / (r.get("folder") or "")
+        r["files"] = sorted(f.name for f in folder.glob("*")) if folder.is_dir() else []
+    return rows
 
 
 def registry_state(doc_series: dict | None = None) -> dict:
@@ -1721,7 +1810,7 @@ def render_form(message: str | None = None, form=None, notice: str | None = None
         doc_sales=form.get("doc_sales", DEFAULT_DOC_SERIES[VOUCHER_SALES]),
         samples_exist=SAMPLE_STATEMENT.exists(),
         master_path=MASTER_MAPPING.name,
-        reg=reg,
+        reg=reg, n_history=len(read_history()),
         **master_preview())
 
 
@@ -1914,11 +2003,23 @@ def run():
         fx_audit = pd.DataFrame(fx_provider.audit_rows()
                                 if hasattr(fx_provider, "audit_rows") else [])
         exceptions = pd.DataFrame(reporter.exceptions)
-        skipped = pd.DataFrame(reporter.skipped)
+        all_skipped = pd.DataFrame(reporter.skipped)
+        # Duplicates get their own view: they are why a re-uploaded statement
+        # produced fewer vouchers, and burying them among zero-amount and
+        # no-entry rows makes that hard to see.
+        if not all_skipped.empty and "Reason" in all_skipped.columns:
+            is_dup = all_skipped["Reason"].astype(str).str.startswith("Already imported")
+            duplicate_rows = all_skipped[is_dup].copy()
+            skipped = all_skipped[~is_dup].copy()
+        else:
+            duplicate_rows = pd.DataFrame()
+            skipped = all_skipped
 
         out_xlsx = workdir / "journal.xlsx"
-        out_csv = write_outputs(out_xlsx, journal, reconciliation, exceptions, skipped,
-                                fx_audit=fx_audit, import_frame=import_frame)
+        # The workbook keeps a single Skipped sheet with everything in it.
+        out_csv = write_outputs(out_xlsx, journal, reconciliation, exceptions,
+                                all_skipped, fx_audit=fx_audit,
+                                import_frame=import_frame)
         # Numbers are NOT committed here. Looking at a journal on screen is not
         # posting it, so the registry is only written when the file is actually
         # downloaded -- see `download`. Until then these numbers stay available.
@@ -1932,7 +2033,12 @@ def run():
     RUNS[run_id] = {"xlsx": out_xlsx, "csv": out_csv,
                     "numberer": numberer, "posted": posted, "committed": False,
                     "stem": Path(statement_path).stem,
-                    "import_frame": import_frame}
+                    "import_frame": import_frame,
+                    "rows_read": len(statement),
+                    "vouchers": journal["Document Number"].nunique() if not journal.empty else 0,
+                    "total_lines": len(journal),
+                    "duplicates": len(duplicate_rows),
+                    "doc_range": doc_range(journal)}
 
     # --- present -------------------------------------------------------------
     total_debit = float(journal["Debit"].sum()) if not journal.empty else 0.0
@@ -1961,8 +2067,7 @@ def run():
         difference=fmt_money(difference), balanced=abs(difference) < 0.005,
         rcm_total=fmt_money(rcm_in), rcm_net=fmt_money(rcm_in - rcm_out) if rcm_in else None,
         errors=len(reporter.errors),
-        duplicates=sum(1 for s in reporter.skipped
-                       if str(s.get("Reason", "")).startswith("Already imported")),
+        duplicates=len(duplicate_rows),
         n_fx=len(fx_audit), n_exc=len(exceptions), n_skip=len(skipped),
         import_table=html_table(import_frame, "Nothing to import.",
                                 numeric=("Amount", "Debit", "Credit",
@@ -1976,7 +2081,12 @@ def run():
                                   precise=("Rate (INR/USD)",),
                                   links={"Source": fx_source_link}),
         exceptions_table=html_table(exceptions, "No exceptions â€” clean run."),
-        skipped_table=html_table(skipped, "Nothing skipped.", numeric=("Amount USD",)))
+        skipped_table=html_table(skipped, "Nothing skipped.", numeric=("Amount USD",)),
+        duplicates_table=html_table(
+            duplicate_rows,
+            "No duplicates — every transaction in this statement is new.",
+            numeric=("Amount USD",)),
+        n_dup=len(duplicate_rows))
 
 
 @app.route("/fx/<rate_date>")
@@ -2045,6 +2155,89 @@ def split_zip(import_frame: pd.DataFrame, stem: str) -> io.BytesIO:
     return buf
 
 
+HISTORY_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>""" + APP_NAME + """ &mdash; converted statements</title>""" + FONT_LINK + """
+<style>{{ css|safe }}</style>
+""" + THEME_BOOT + """</head><body>
+<div class="shell">
+<aside class="side">
+  <div class="logo">
+    <div class="mark">""" + BOOK_ICON + """</div>
+    <div><div class="nm">""" + APP_NAME + """</div>
+         <div class="co">""" + COMPANY + """</div></div>
+  </div>
+  <div class="sblock c1">
+    <div class="slabel">Converted so far</div>
+    <div class="srow"><span class="k">Statements</span><span class="v big">{{ runs|length }}</span></div>
+    <div class="srow"><span class="k">Ref IDs on record</span><span class="v big">{{ n_refs }}</span></div>
+    <div class="snote">Only downloaded runs are kept &mdash; the same rule the
+      document numbers follow.</div>
+  </div>
+  <div class="sblock c4">
+    <div class="slabel">Go</div>
+    <div class="row" style="margin-top:2px">
+      <a href="{{ url_for('index') }}" style="width:100%">
+        <button type="button" style="width:100%">&larr; New journal</button></a>
+    </div>
+  </div>
+</aside>
+<main class="main">
+  <div class="top"><h1>Converted statements</h1>
+    <span class="s">what has been imported, and the files it produced</span>
+    """ + TOPRIGHT.replace('<div class="topright">',
+                           '<div class="topright">' + BACK_BTN) + """</div>
+
+  {% if not runs %}
+  <div class="panel"><p class="psub" style="margin:0">Nothing converted yet.
+    A statement appears here once you download its output.</p></div>
+  {% else %}
+  {% for r in runs %}
+  <div class="panel">
+    <div class="step"><span class="n">{{ loop.index }}</span>
+      <h2>{{ r.statement }}</h2></div>
+    <p class="psub">{{ r.converted_at }} &middot; {{ r.rows_read }} rows &rarr;
+      {{ r.vouchers }} vouchers, {{ r.journal_lines }} lines
+      {%- if r.duplicates and r.duplicates != '0' %} &middot;
+      {{ r.duplicates }} already imported{% endif %}
+      {%- if r.doc_numbers %}<br>{{ r.doc_numbers }}{% endif %}</p>
+    <div class="row" style="margin-top:0">
+      {% for f in r.files %}
+      <a href="{{ url_for('history_file', folder=r.folder, name=f) }}">
+        <button class="ghost">{{ f }}</button></a>
+      {% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+  {% endif %}
+</main></div>
+<script>""" + TAB_JS + """</script></body></html>"""
+
+
+@app.route("/history")
+def history():
+    """Statements already converted, with their output files."""
+    refs = 0
+    if DEFAULT_POSTED_LEDGER.exists():
+        try:
+            refs = max(0, sum(1 for _ in DEFAULT_POSTED_LEDGER.open(encoding="utf-8")) - 1)
+        except OSError:
+            refs = 0
+    return render_template_string(HISTORY_HTML, css=BASE_CSS,
+                                  runs=read_history(), n_refs=refs)
+
+
+@app.route("/history/<folder>/<name>")
+def history_file(folder: str, name: str):
+    """Serve one archived output file."""
+    base = EXPORTS_DIR.resolve()
+    target = (base / folder / name).resolve()
+    # Never serve anything outside the exports folder, whatever the URL says.
+    if not str(target).startswith(str(base)) or not target.is_file():
+        abort(404)
+    return send_file(target, as_attachment=True, download_name=target.name)
+
+
 @app.route("/download/<run_id>/<kind>")
 def download(run_id: str, kind: str):
     if kind not in ("xlsx", "csv", "split"):
@@ -2069,6 +2262,7 @@ def download(run_id: str, kind: str):
             run["numberer"].save()
             run["posted"].save()
             run["committed"] = True
+            archive_run(run)
         except Exception:
             # A registry that cannot be written must not block the download; the
             # figures are still correct, only the reservation is missing.

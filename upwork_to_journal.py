@@ -124,6 +124,10 @@ IMPORT_COLUMNS = [
     "Ledger Name", "Amount", "Debit", "Credit", "Amount in base currency",
     "Amount in INR", "Currency", "Exchange Rate", "I/E", "Cost center Name",
     "Narration",
+    # After every column the accounting system reads, so importing is unaffected.
+    # It is the key that says which Upwork transaction a line came from, which is
+    # what makes an imported file traceable back to the statement.
+    "Ref ID",
 ]
 
 #: Cell tokens meaning "this leg is not used".
@@ -1389,6 +1393,7 @@ def build_import_frame(journal: pd.DataFrame, *, entity: str, currency: str,
             "I/E": ie_flag,
             "Cost center Name": line["Cost Center"],
             "Narration": line["Narration"],
+            "Ref ID": line.get("Ref ID", ""),
         })
     return pd.DataFrame(rows, columns=IMPORT_COLUMNS)
 
