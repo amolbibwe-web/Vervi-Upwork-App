@@ -53,7 +53,7 @@ from upwork_to_journal import (DEFAULT_DOC_REGISTRY, DEFAULT_DOC_SERIES,
                                Reporter, add_treatment, add_wallet,
                                build_import_frame, build_journal,
                                PostedLedger, DEFAULT_POSTED_LEDGER,
-                               import_posted_refs, read_posted_refs,
+                               read_posted_refs,
                                update_posted_ref,
                                build_reconciliation, clean_text, delete_treatment,
                                delete_wallet, load_mapping, load_statement,
@@ -2244,24 +2244,6 @@ HISTORY_HTML = """<!doctype html><html><head><meta charset="utf-8">
 
     <div id="h-refs" class="pane">
       {{ refs_table|safe }}
-
-      <form class="addrow" method="post" action="{{ url_for('import_refs_route') }}"
-            enctype="multipart/form-data">
-        <div class="addhead">Load Ref IDs you imported before this tool existed.
-          Upload a CSV with a <code>Ref ID</code> column &mdash; anything else in
-          the file is ignored. Those transactions will then be recognised as
-          already imported.</div>
-        <div class="addgrid">
-          <div><label for="refs-file">CSV file</label>
-            <input type="file" id="refs-file" name="refs" accept=".csv,.xlsx" required></div>
-          <div><label for="refs-note">Label these as</label>
-            <input type="text" id="refs-note" name="note" value="imported before this tool"></div>
-          <button type="submit" class="ghost">Load Ref IDs</button>
-        </div>
-        <div class="snote" style="color:var(--muted);margin-top:10px">
-          <a href="{{ url_for('refs_template') }}">Download a blank template</a>
-        </div>
-      </form>
     </div>
   </div>
 
@@ -2297,49 +2279,6 @@ function editRef(btn){
   document.getElementById('ref-form').submit();
 }
 </script></body></html>"""
-
-
-@app.route("/refs/import", methods=["POST"])
-def import_refs_route():
-    """Load Ref IDs that were imported before this tool was in use."""
-    try:
-        upload = request.files.get("refs")
-        if not upload or not upload.filename:
-            return redirect(url_for("history", error="Choose a CSV of Ref IDs to load."))
-        workdir = Path(mkdtemp(prefix="vervi_refs_"))
-        path = save_upload(upload, workdir)
-        frame = (pd.read_csv(path, dtype=object, keep_default_na=False)
-                 if path.suffix.lower() == ".csv"
-                 else pd.read_excel(path, dtype=object))
-        # Accept whatever the column is called, as long as it means Ref ID.
-        col = next((c for c in frame.columns
-                    if str(c).strip().lower().replace(" ", "") in
-                    ("refid", "ref", "referenceid", "refno", "refnumber")), None)
-        if col is None:
-            return redirect(url_for("history", error=(
-                "That file has no 'Ref ID' column. Download the template to see "
-                "the shape expected.")))
-        added, known = import_posted_refs(
-            DEFAULT_POSTED_LEDGER, frame[col].tolist(),
-            note=clean_text(request.form.get("note", "")) or "loaded manually")
-    except Exception as exc:
-        return redirect(url_for("history", error=f"{type(exc).__name__}: {exc}"))
-    msg = f"Loaded {added} Ref ID{'' if added == 1 else 's'}"
-    if known:
-        msg += f"; {known} {'was' if known == 1 else 'were'} already on record"
-    return redirect(url_for("history", added=msg))
-
-
-@app.route("/refs/template")
-def refs_template():
-    """A blank CSV showing the one column that matters."""
-    rows = ["Ref ID,Note",
-            "938550170,example - only the Ref ID column is read",
-            "938550154,"]
-    body = "\n".join(rows) + "\n"
-    buf = io.BytesIO(body.encode("utf-8-sig"))
-    return send_file(buf, as_attachment=True, mimetype="text/csv",
-                     download_name="ref-ids-template.csv")
 
 
 @app.route("/refs/edit", methods=["POST"])
@@ -2429,7 +2368,7 @@ def history():
         refs_table=html_table(
             refs_frame,
             "No Ref IDs on record yet — they are added when you download a "
-            "conversion, or you can load older ones below.",
+            "conversion.",
             actions=ref_action))
 
 

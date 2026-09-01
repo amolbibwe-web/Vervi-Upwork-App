@@ -11,11 +11,11 @@
 # the next number issued is exactly the one you asked for.
 
 param(
-    [int]$SalesFrom = 26,
+    [int]$SalesFrom = 36,
     [string]$SalesPrefix = "26-27/VASL/U/",
     # JE numbering restarts every month, so an opening position is per month.
     # Months not listed here simply start at 001.
-    [hashtable]$JeOpenings = @{ "26-27/LLP/Aug/" = 21 },
+    [hashtable]$JeOpenings = @{ "26-27/LLP/Aug/" = 63 },
     [string]$OpeningDate = "2026-04-01"
 )
 
