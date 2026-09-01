@@ -1033,6 +1033,26 @@ class DocumentNumberer:
                 f"run rather than risk reusing document numbers")
         self.resumed_from = dict(self._counters)
 
+    def _format(self, kind: str, day, seq: int) -> tuple[str, str]:
+        """Render one number, and the prefix its counter is keyed on."""
+        template = self.series.get(kind, DEFAULT_DOC_SERIES[VOUCHER_JE])
+        fields = {"fy": financial_year(day), "mon": day.strftime("%b"),
+                  "mm": f"{day.month:02d}", "yyyy": f"{day.year}"}
+        prefix = template.replace("{seq:03d}", "").replace("{seq}", "").format(**fields)
+        return template.format(seq=seq, **fields), prefix
+
+    def peek(self, kind: str, day) -> tuple[str, str | None]:
+        """(next number, last used) for a series -- without consuming anything.
+
+        The sidebar needs to show where numbering stands; asking for the next
+        number should never be what advances it.
+        """
+        _, prefix = self._format(kind, day, 1)
+        used = self._counters.get(prefix, 0)
+        nxt, _ = self._format(kind, day, used + 1)
+        last = self._format(kind, day, used)[0] if used else None
+        return nxt, last
+
     def next(self, kind: str, day) -> str:
         template = self.series.get(kind, DEFAULT_DOC_SERIES[VOUCHER_JE])
         fields = {"fy": financial_year(day), "mon": day.strftime("%b"),

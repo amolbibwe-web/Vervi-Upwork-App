@@ -44,6 +44,8 @@ from werkzeug.utils import secure_filename
 
 from rbi_fx import (ARCHIVE_URL, FxProvider, RateCache, RbiArchiveClient,
                     RbiFxProvider)
+from datetime import datetime
+
 from upwork_to_journal import (DEFAULT_DOC_REGISTRY, DEFAULT_DOC_SERIES,
                                VOUCHER_JE, VOUCHER_SALES, DocumentNumberer,
                                Reporter, add_treatment, add_wallet,
@@ -970,12 +972,18 @@ FORM_SIDE = """
   </div>
   <div class="sblock c3">
     <div class="slabel">Document numbers</div>
-    <div class="srow"><span class="k">Issued so far</span><span class="v">{{ n_issued }}</span></div>
-    {% for p, s in last_numbers %}
-    <div class="srow"><span class="k">{{ p }}</span><span class="v">{{ '%03d'|format(s) }}</span></div>
-    {% endfor %}
-    <div class="snote">Numbering continues from here &mdash; a new statement never
-      reuses a number.</div>
+    {% if reg.ok %}
+    <div class="srow"><span class="k">Last Sales used</span>
+      <span class="v">{{ reg.sales_last or '&mdash;'|safe }}</span></div>
+    <div class="srow"><span class="k">Next Sales</span>
+      <span class="v big">{{ reg.sales_next }}</span></div>
+    <div class="srow"><span class="k">Last JE used ({{ reg.je_month }})</span>
+      <span class="v">{{ reg.je_last or '&mdash;'|safe }}</span></div>
+    <div class="srow"><span class="k">Next JE</span>
+      <span class="v big">{{ reg.je_next }}</span></div>
+    {% endif %}
+    <div class="snote">Numbering continues from the last one you actually
+      exported &mdash; a new statement never reuses a number.</div>
   </div>
 """
 
@@ -1525,19 +1533,26 @@ def save_upload(file_storage, folder: Path) -> Path | None:
     return target
 
 
-def registry_state() -> tuple[int, list[tuple[str, int]]]:
-    """How many document numbers exist, and where each series has reached."""
-    if not DEFAULT_DOC_REGISTRY.exists():
-        return 0, []
+def registry_state(doc_series: dict | None = None) -> dict:
+    """Where numbering stands: the last number used, and the next one out.
+
+    A count of rows was the wrong thing to show -- what matters before a run is
+    "the last invoice I actually issued", so numbering visibly continues from
+    there. Read through DocumentNumberer so the seed file counts too, and via
+    peek() so looking never consumes a number.
+    """
     try:
-        frame = pd.read_csv(DEFAULT_DOC_REGISTRY, dtype=object, keep_default_na=False)
+        n = DocumentNumberer(doc_series, registry_path=DEFAULT_DOC_REGISTRY,
+                             source="preview")
     except Exception:
-        return 0, []
-    if frame.empty or "prefix" not in frame.columns:
-        return 0, []
-    frame["seq"] = pd.to_numeric(frame["seq"], errors="coerce").fillna(0).astype(int)
-    highest = frame.groupby("prefix")["seq"].max().sort_index()
-    return len(frame), list(highest.items())
+        return {"ok": False}
+
+    today = datetime.now().date()
+    sales_next, sales_last = n.peek(VOUCHER_SALES, today)
+    je_next, je_last = n.peek(VOUCHER_JE, today)
+    return {"ok": True, "sales_next": sales_next, "sales_last": sales_last,
+            "je_next": je_next, "je_last": je_last,
+            "je_month": today.strftime("%b")}
 
 
 # --------------------------------------------------------------------------- #
@@ -1686,7 +1701,11 @@ def master_preview() -> dict:
 def render_form(message: str | None = None, form=None, notice: str | None = None) -> str:
     """The upload form, optionally with an error, preserving what was typed."""
     form = form or {}
-    n_issued, last_numbers = registry_state()
+    doc_series = {
+        VOUCHER_JE: form.get("doc_je", "").strip() or DEFAULT_DOC_SERIES[VOUCHER_JE],
+        VOUCHER_SALES: form.get("doc_sales", "").strip() or DEFAULT_DOC_SERIES[VOUCHER_SALES],
+    }
+    reg = registry_state(doc_series)
     return render_template_string(
         FORM_HTML, css=BASE_CSS, error=message, notice=notice,
         currency=form.get("currency", "INR"), fx_rate=form.get("fx_rate", ""),
@@ -1702,7 +1721,7 @@ def render_form(message: str | None = None, form=None, notice: str | None = None
         doc_sales=form.get("doc_sales", DEFAULT_DOC_SERIES[VOUCHER_SALES]),
         samples_exist=SAMPLE_STATEMENT.exists(),
         master_path=MASTER_MAPPING.name,
-        n_issued=n_issued, last_numbers=last_numbers,
+        reg=reg,
         **master_preview())
 
 
