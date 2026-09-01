@@ -2344,14 +2344,10 @@ def history():
                 f'<button type="button" class="editbtn">Download</button></a>')
 
     ref_rows = read_posted_refs(DEFAULT_POSTED_LEDGER)
-    refs_frame = pd.DataFrame([{
-        "Ref ID": r.get("ref_id", ""),
-        "Date": r.get("date", ""),
-        "Type": r.get("transaction_type", ""),
-        "Posted as": r.get("document_number", ""),
-        "From": r.get("source", ""),
-        "Recorded": r.get("posted_at", ""),
-    } for r in ref_rows])
+    # Ref ID and the Edit button, nothing else. The ledger stores the date, type
+    # and document number behind each one, but this list is only ever read to
+    # answer "is this transaction already in?" -- the rest is noise on screen.
+    refs_frame = pd.DataFrame([{"Ref ID": r.get("ref_id", "")} for r in ref_rows])
 
     def ref_action(row):
         ref = escape(str(row["Ref ID"]), quote=True)
