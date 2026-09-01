@@ -2047,11 +2047,19 @@ def split_zip(import_frame: pd.DataFrame, stem: str) -> io.BytesIO:
 
 @app.route("/download/<run_id>/<kind>")
 def download(run_id: str, kind: str):
+    if kind not in ("xlsx", "csv", "split"):
+        abort(404)
+
     run = RUNS.get(run_id)
-    if not run or kind not in ("xlsx", "csv", "split"):
-        abort(404)
-    if kind in ("xlsx", "csv") and not run[kind].exists():
-        abort(404)
+    # A run lives in memory until it is downloaded, so a restart loses it.
+    # Say so plainly -- and say that nothing was consumed -- rather than
+    # showing a bare 404 that looks like the file failed to build.
+    if not run or (kind in ("xlsx", "csv") and not run[kind].exists()):
+        return render_form(
+            "That download expired. The app restarted before you downloaded it, "
+            "so the file is gone. Nothing was posted and no document numbers were "
+            "used — generate the journal again and it will produce the same "
+            "numbers.")
 
     # Downloading is the moment the numbers leave the tool and become real, so
     # this is where they are committed to the registry. Generating and then

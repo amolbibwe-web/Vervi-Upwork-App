@@ -14,7 +14,11 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn webapp:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    # ONE worker on purpose. A generated run -- its files, its reserved
+    # document numbers, its pending Ref IDs -- is held in memory until the
+    # download commits it. With two workers the download can land on the
+    # process that never saw the run, and 404s.
+    startCommand: gunicorn webapp:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 180
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.10"
